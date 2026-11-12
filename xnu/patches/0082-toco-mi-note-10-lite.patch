@@ -139,7 +139,7 @@ index 03defe6..0185d4f 100644
  			return EIO;
  		}
  		mask |= 1u << id;
-@@ -487,7 +508,116 @@ touch_focaltech(void)
+@@ -487,6 +508,115 @@ touch_focaltech(void)
  	return 0;
  }
  
@@ -203,8 +203,8 @@ index 03defe6..0185d4f 100644
 +		} else if (e[0] == FTS_T_EVT_READY) {
 +			/* The IC rebooted (ESD): restore sensing as the vendor does. */
 +			uint8_t on = FTS_T_SENSE_ON;
-+			int err = touch_msg(FTS_T_ADDR, &on, 1, NULL, 0, false);
-+			printf("SWEET TOUCH: controller ready, sense on=%d\n", err);
++			int serr = touch_msg(FTS_T_ADDR, &on, 1, NULL, 0, false);
++			printf("SWEET TOUCH: controller ready, sense on=%d\n", serr);
 +		} else if (e[0] == FTS_T_EVT_ERROR) {
 +			printf("SWEET TOUCH: error event %02x %02x %02x %02x\n",
 +			    e[1], e[2], e[3], e[4]);
@@ -252,7 +252,6 @@ index 03defe6..0185d4f 100644
 +	}
 +	return err;
 +}
- 
  static bool
  touch_se_init(void)
  {
