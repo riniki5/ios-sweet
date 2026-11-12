@@ -4,7 +4,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 CC=aarch64-linux-gnu-gcc
 OBJCOPY=aarch64-linux-gnu-objcopy
-CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
+# Panel height: sweet (Redmi Note 10 Pro) 2400, toco (Mi Note 10 Lite) 2340.
+case "${SWEET_DEVICE:-sweet}" in
+sweet) PANEL_H=2400 ;;
+toco) PANEL_H=2340 ;;
+*) echo "error: unknown SWEET_DEVICE=${SWEET_DEVICE}" >&2; exit 1 ;;
+esac
+CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DFB_H=$PANEL_H"
 mkdir -p out
 for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o

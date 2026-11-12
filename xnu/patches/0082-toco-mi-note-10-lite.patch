@@ -1,0 +1,421 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 4da50d8..5dc56fc 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -1,5 +1,6 @@
+ /*
+- * SWEET PM6150L L11C bring-up; see report.md for DT and source evidence.
++ * SWEET PM6150L touch-AVDD bring-up (sweet L11C, toco L6); see report.md
++ * for DT and source evidence.
+  * Sole XNU apps-DRV owner, called from thread context with deep idle disabled.
+  * No sleep/wake programming, SPMI writes, GIC handler, or timeout recovery.
+  */
+@@ -234,7 +235,7 @@ rh_send(uint32_t address, unsigned mv)
+ 		for (unsigned c = 0; c < rh_ncpt; ++c) {
+ 			if ((enabled & (1u << c)) &&
+ 			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
+-				printf("SWEET RPMH: conflicting inherited L11C request in TCS%u\n", t);
++				printf("SWEET RPMH: conflicting inherited regulator request in TCS%u\n", t);
+ 				return EBUSY;
+ 			}
+ 		}
+@@ -320,16 +321,28 @@ rh_send(uint32_t address, unsigned mv)
+ 		return EIO;
+ 	}
+ 	rh_poisoned = false;
+-	printf("SWEET RPMH: L11C ACTIVE vote complete (rail voltage requires hardware verification)\n");
++	printf("SWEET RPMH: LDO ACTIVE vote complete (rail voltage requires hardware verification)\n");
+ 	return 0;
+ }
+ 
+ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+-	/* Board-specific helper: do not apply PMIC5-LDO policy to arbitrary resources. */
+-	if (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {
+-		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
++	/*
++	 * Board-specific helper: do not apply PMIC5-LDO policy to arbitrary
++	 * resources. The DT gives ldoc11 (sweet touch) 2.95..3.4 V and ldoc6
++	 * (toco touch) 1.648..3.1 V.
++	 */
++	unsigned lo = 0, hi = 0;
++	if (res && !strcmp(res, "ldoc11")) {
++		lo = 2950;
++		hi = 3400;
++	} else if (res && !strcmp(res, "ldoc6")) {
++		lo = 1600;
++		hi = 3100;
++	}
++	if (!hi || mv < lo || mv > hi) {
++		printf("SWEET RPMH: expected ldoc11 2950..3400 mV or ldoc6 1600..3100 mV\n");
+ 		return EINVAL;
+ 	}
+ 	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 03defe6..1306b47 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -1,9 +1,12 @@
+ /*
+- * SWEET SE7 FIFO I2C / GT9896 Yellowstone / Focaltech 54:52 bring-up.
++ * SWEET SE7 FIFO I2C / GT9896 Yellowstone / Focaltech bring-up.
++ * toco's FTS speaks FTM5 (opcode 0x86 FIFO, 8-byte events); sweet's speaks
++ * the older 1-byte 54:52 register protocol.
+  * Call once after the scheduler is running; all work runs on one thread.
+- * Requires ABL-loaded GENI I2C firmware; votes L11C through sweet_rpmh.c.
+- * No firmware/config upload or direct PMIC writes. Only IC data write:
+- * zero to GT9896's event status after reading a report. See touch2/report.md.
++ * Requires ABL-loaded GENI I2C firmware. votes the touch AVDD LDO through
++ * sweet_rpmh.c (sweet: L11C; toco: L6). No firmware/config upload or direct
++ * PMIC writes. Only IC data write: zero to GT9896's event status after
++ * reading a report. See touch2/report.md.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -14,6 +17,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/pexpert/device_tree.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -32,6 +36,15 @@ void sweet_touch_init(void);
+ #define TOUCH_MAX        10u
+ #define TOUCH_GOODIX     1
+ #define TOUCH_FTS        2
++#define TOUCH_FTS_FTM5   3
++/* toco's Focaltech FTM5 uses one-byte opcodes and 8-byte FIFO events. */
++#define FTM5_ADDR        0x49u
++#define FTM5_FIFO_READ   0x86u
++#define FTM5_EVT_ENTER   0x13u
++#define FTM5_EVT_MOTION  0x23u
++#define FTM5_EVT_LEAVE   0x33u
++#define FTM5_EVT_LAST    0x1fu
++#define FTM5_FIFO_DEPTH  32u
+ /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
+ #define GOODIX_PID_REG   0x4022u
+ #define GOODIX_EVENT_REG 0x4180u
+@@ -80,6 +93,10 @@ static struct {
+ 	int x[TOUCH_MAX], y[TOUCH_MAX];
+ } st;
+ static int touch_sleep_chan;
++/* Native digitizer size from /sweet-fbcon; 1080x2400 is the sweet default. */
++static uint32_t touch_panel_w = 1080, touch_panel_h = 2400;
++/* Focaltech address: 0x38 on sweet, 0x49 on toco. Set by the probe. */
++static uint8_t touch_fts_addr = 0x38;
+ 
+ static uint32_t
+ touch_rd(vm_offset_t base, uint32_t off)
+@@ -425,7 +442,7 @@ touch_goodix(void)
+ 		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
+ 		/* Low nibble 1/3 denotes pen data in the vendor parser. */
+ 		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
+-		    (mask & (1u << id)) || px > 1079 || py > 2399) {
++		    (mask & (1u << id)) || px >= touch_panel_w || py >= touch_panel_h) {
+ 			(void)touch_goodix_ack();
+ 			return EIO;
+ 		}
+@@ -446,7 +463,7 @@ touch_focaltech(void)
+ 	uint8_t buf[63];
+ 	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
+ 	uint32_t mask = 0, seen = 0;
+-	int err = touch_read(0x38, 0, false, buf, sizeof(buf));
++	int err = touch_read(touch_fts_addr, 0, false, buf, sizeof(buf));
+ 	if (err) {
+ 		return err;
+ 	}
+@@ -472,7 +489,7 @@ touch_focaltech(void)
+ 		}
+ 		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
+ 		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
+-		if (px > 1079 || py > 2399) {
++		if (px >= touch_panel_w || py >= touch_panel_h) {
+ 			return EIO;
+ 		}
+ 		mask |= 1u << id;
+@@ -487,6 +504,78 @@ touch_focaltech(void)
+ 	return 0;
+ }
+ 
++static int
++touch_fts_ftm5_frame(int x[], int y[], uint32_t *mask)
++{
++	uint8_t e[8];
++	int err = touch_read(FTM5_ADDR, FTM5_FIFO_READ, false, e, sizeof(e));
++	if (err) {
++		return err;
++	}
++	/* event[7] low 5 bits count the events still queued behind this one. */
++	for (unsigned n = 0; n < FTM5_FIFO_DEPTH; ++n) {
++		unsigned id = e[1] >> 4, type = e[1] & 15u;
++		if (e[0] == FTM5_EVT_ENTER || e[0] == FTM5_EVT_MOTION) {
++			/* Finger/glove/stylus/palm report contacts; 0 is invalid. */
++			if (type == 0 || type > 4u || id >= TOUCH_MAX) {
++				return EIO;
++			}
++			unsigned px = ((unsigned)(e[3] & 15u) << 8) | e[2];
++			unsigned py = ((unsigned)e[4] << 4) | ((e[3] & 0xf0u) >> 4);
++			px = px >= touch_panel_w ? touch_panel_w - 1 : px;
++			py = py >= touch_panel_h ? touch_panel_h - 1 : py;
++			*mask |= 1u << id;
++			x[id] = (int)px;
++			y[id] = (int)py;
++		} else if (e[0] == FTM5_EVT_LEAVE) {
++			if (id >= TOUCH_MAX) {
++				return EIO;
++			}
++			*mask &= ~(1u << id);
++		}
++		if (!(e[7] & FTM5_EVT_LAST)) {
++			break;
++		}
++		err = touch_read(FTM5_ADDR, FTM5_FIFO_READ, false, e, sizeof(e));
++		if (err) {
++			return err;
++		}
++	}
++	return 0;
++}
++
++static int
++touch_fts_ftm5(void)
++{
++	int x[TOUCH_MAX], y[TOUCH_MAX];
++	uint32_t mask = st.active;
++	for (unsigned id = 0; id < TOUCH_MAX; ++id) {
++		x[id] = st.x[id];
++		y[id] = st.y[id];
++	}
++	int err = touch_fts_ftm5_frame(x, y, &mask);
++	if (!err) {
++		touch_report(mask, x, y);
++	}
++	return err;
++}
++
++static int
++touch_fts_ftm5_probe(uint8_t *evt)
++{
++	int err = EIO;
++	/* The IC boots after reset; allow its firmware to bring the FIFO up. */
++	for (unsigned i = 0; i < 10; ++i) {
++		err = touch_read(FTM5_ADDR, FTM5_FIFO_READ, false, evt, 8);
++		if (!err && (evt[0] == 0x00u || (evt[0] & 15u) == 3u)) {
++			return 0;
++		}
++		err = EIO;
++		touch_wait(50);
++	}
++	return err;
++}
++
+ static bool
+ touch_se_init(void)
+ {
+@@ -545,6 +634,26 @@ touch_se_init(void)
+ 	return true;
+ }
+ 
++static void
++touch_panel_geometry(void)
++{
++	DTEntry entry;
++	uint32_t const *val;
++	unsigned int size;
++
++	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) != kSuccess) {
++		return;
++	}
++	if (SecureDTGetProperty(entry, "width", (void const **)&val, &size) == kSuccess &&
++	    size >= sizeof(*val) && *val) {
++		touch_panel_w = *val;
++	}
++	if (SecureDTGetProperty(entry, "height", (void const **)&val, &size) == kSuccess &&
++	    size >= sizeof(*val) && *val) {
++		touch_panel_h = *val;
++	}
++}
++
+ static void
+ touch_thread(void *arg, wait_result_t result)
+ {
+@@ -569,18 +678,33 @@ touch_thread(void *arg, wait_result_t result)
+ 	if (!touch_clocks() || !touch_se_init()) {
+ 		goto out;
+ 	}
+-	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
++	touch_panel_geometry();
++	bool toco = touch_panel_h == 2340;
++	int vddio = toco ? 72 : 90;
++	printf("SWEET TOUCH: panel %ux%u TLMM reset=%#x irq=%#x vddio=%#x; voting touch AVDD through RPMh\n",
++	    touch_panel_w, touch_panel_h,
+ 	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
+-	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)));
++	    touch_rd(st.gpio, TOUCH_GPIO_IO(vddio)));
+ 	/* Keep the IC in reset while its rails settle; IRQ stays an input. */
+ 	touch_gpio(9, 0, 3, 3, false, false); /* IRQ input, 8 mA, pull-up */
+ 	touch_gpio(8, 0, 3, 3, true, false);
+-	int power_error = sweet_rpmh_vreg_enable("ldoc11", 3200);
+-	if (power_error) {
++	/*
++	 * sweet (GT9896): L11C 3.2 V, GPIO90 digital enable. toco (FTS):
++	 * PM6150L L6 at the DT init voltage (1.648 V), VDDIO on GPIO72; the
++	 * stock driver only enables the rail too. An inherited firmware vote
++	 * makes the helper return EBUSY; the rail is then already up, so on
++	 * toco log it and keep probing.
++	 */
++	int power_error = toco ? sweet_rpmh_vreg_enable("ldoc6", 1648) :
++	    sweet_rpmh_vreg_enable("ldoc11", 3200);
++	if (power_error && !toco) {
+ 		printf("SWEET TOUCH: L11C RPMh enable failed %d; probes skipped\n", power_error);
+ 		goto out;
+ 	}
+-	touch_gpio(90, 0, 0, 0, true, true); /* board digital power enable */
++	if (power_error) {
++		printf("SWEET TOUCH: L6 RPMh vote failed %d; assuming firmware left it on\n", power_error);
++	}
++	touch_gpio(vddio, 0, 0, 0, true, true); /* touch VDDIO fixed regulator */
+ 	touch_wait(10); /* conservative rail settling; not a DT timing value */
+ 	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
+ 	touch_gpio(7, 1, 0, 0, false, false);
+@@ -589,33 +713,41 @@ touch_thread(void *arg, wait_result_t result)
+ 	touch_wait(2);
+ 	touch_gpio(8, 0, 3, 3, true, true);
+ 	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
+-	uint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;
++	uint8_t gid[32], legacy[32], fm5[8], fid1 = 0, fid2 = 0;
+ 	st.probing = true;
+ 	int ge = touch_probe_info(GOODIX_PID_REG, gid);
+ 	printf("SWEET TOUCH: probe 0x5d err=%d pid=%02x%02x%02x%02x fw=%02x.%02x.%02x.%02x irq=%#x\n",
+ 	    ge, gid[0], gid[1], gid[2], gid[3], gid[8], gid[9], gid[10], gid[11], st.irq_status);
+ 	(void)touch_probe_info(0x8240, legacy);
++	int fm = touch_fts_ftm5_probe(fm5);
++	printf("SWEET TOUCH: probe 0x49 FTM5 err=%d evt=%02x %02x %02x %02x %02x %02x %02x %02x irq=%#x\n",
++	    fm, fm5[0], fm5[1], fm5[2], fm5[3], fm5[4], fm5[5], fm5[6], fm5[7], st.irq_status);
++	/* sweet's Focaltech uses the older 54:52 register protocol at 0x38. */
+ 	int fe1 = touch_read(0x38, 0xa3, false, &fid1, 1);
+ 	int fe2 = touch_read(0x38, 0x9f, false, &fid2, 1);
+ 	printf("SWEET TOUCH: probe 0x38 err=%d/%d chip-id=%02x:%02x irq=%#x\n",
+ 	    fe1, fe2, fid1, fid2, st.irq_status);
+ 	st.probing = false;
+ 	bool goodix = !ge && gid[0] == '9' && gid[1] == '8' && gid[2] == '9' && gid[3] == '6';
+-	bool fts = !fe1 && !fe2 && fid1 == 0x54 && fid2 == 0x52;
+-	if (st.dead || goodix == fts) {
+-		printf("SWEET TOUCH: no unique supported IC (goodix=%d fts=%d dead=%d); stopping\n",
+-		    goodix, fts, st.dead);
++	bool ftm5 = !fm;
++	bool fts38 = !fe1 && !fe2 && fid1 == 0x54 && fid2 == 0x52;
++	if (st.dead || goodix + ftm5 + fts38 != 1) {
++		printf("SWEET TOUCH: no unique supported IC (goodix=%d ftm5=%d fts38=%d dead=%d); stopping\n",
++		    goodix, ftm5, fts38, st.dead);
+ 		goto out;
+ 	}
+-	st.kind = goodix ? TOUCH_GOODIX : TOUCH_FTS;
+-	printf("SWEET TOUCH: selected %s, 1080x2400, poll=10ms irq-hint=%d\n",
+-	    goodix ? "GT9896 Yellowstone" : "Focaltech 54:52", st.irq_hint);
++	st.kind = goodix ? TOUCH_GOODIX : ftm5 ? TOUCH_FTS_FTM5 : TOUCH_FTS;
++	touch_fts_addr = fts38 ? 0x38 : 0x49;
++	printf("SWEET TOUCH: selected %s at 0x%02x, %ux%u, poll=10ms irq-hint=%d\n",
++	    goodix ? "GT9896 Yellowstone" : ftm5 ? "Focaltech FTM5" : "Focaltech 54:52",
++	    goodix ? 0x5d : touch_fts_addr, touch_panel_w, touch_panel_h, st.irq_hint);
+ 	unsigned errors = 0, ticks = 0;
+ 	while (!st.dead) {
+ 		/* Optional IRQ hint still reads every 100ms, and always while down. */
+ 		if (!st.irq_hint || st.active || !(touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u) ||
+ 		    (++ticks % 10u) == 0) {
+-			int err = st.kind == TOUCH_GOODIX ? touch_goodix() : touch_focaltech();
++			int err = st.kind == TOUCH_GOODIX ? touch_goodix() :
++			    st.kind == TOUCH_FTS_FTM5 ? touch_fts_ftm5() : touch_focaltech();
+ 			if (err) {
+ 				if ((errors++ % 100u) == 0) {
+ 					printf("SWEET TOUCH: report err=%d irq=%#x\n", err, st.irq_status);
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 27bc49d..313a11c 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -28,6 +28,7 @@
+ #include "IOHIDKeys.h"
+ #include "IOHIDPrivateKeys.h"
+ #include "IOHIDUsageTables.h"
++#include <pexpert/pexpert/device_tree.h>
+ 
+ extern "C" uint64_t mach_absolute_time(void);
+ 
+@@ -367,6 +368,7 @@ protected:
+ 	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 2; }
+ private:
+ 	IOLock *fLock;
++	int fPanelW, fPanelH;                   /* native digitizer size */
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+@@ -432,19 +434,40 @@ SweetHIDTouch::start(IOService *provider)
+ 	if (!fLock || !IOHIDEventService::start(provider)) {
+ 		return false;
+ 	}
++	/* Native panel size from the boot ADT; 1080x2400 is the sweet default. */
++	fPanelW = 1080;
++	fPanelH = 2400;
++	DTEntry entry;
++	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) == kSuccess) {
++		uint32_t const *val;
++		unsigned int size;
++		if (SecureDTGetProperty(entry, "width", (void const **)&val, &size) == kSuccess &&
++		    size >= sizeof(*val) && *val) {
++			fPanelW = (int)*val;
++		}
++		if (SecureDTGetProperty(entry, "height", (void const **)&val, &size) == kSuccess &&
++		    size >= sizeof(*val) && *val) {
++			fPanelH = (int)*val;
++		}
++	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	fLogicalW = fPanelW;
++	fLogicalH = fPanelH;
++	if (!native && fPanelW <= 1125 && fPanelH <= 2436) {
++		fLogicalW = 1125;
++		fLogicalH = 2436;
++	}
++	fOffX = (fLogicalW - fPanelW) / 2;
++	fOffY = (fLogicalH - fPanelH) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+ 	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
+ 	gSweetTouch = this;
+ 	registerService();
+-	IOLog("SWEET HID: touch registered\n");
++	IOLog("SWEET HID: touch registered, panel %dx%d presented as %dx%d\n",
++	    fPanelW, fPanelH, fLogicalW, fLogicalH);
+ 	return true;
+ }
+ 
+@@ -458,8 +481,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	x = x < 0 ? 0 : (x >= fPanelW ? fPanelW - 1 : x);
++	y = y < 0 ? 0 : (y >= fPanelH ? fPanelH - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+@@ -472,8 +495,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x >= fPanelW - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y >= fPanelH - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);

@@ -22,7 +22,11 @@ An undecodable or blank screen returns 3 with --fail-on-panic.
 """
 import argparse, json, os, shutil, socket, struct, subprocess, sys, time, zlib
 
-FB_BASE, FB_W, FB_H = 0x9c000000, 1080, 2400
+DEVICE = os.environ.get('SWEET_DEVICE', 'sweet')
+FB_H = {'sweet': 2400, 'toco': 2340}.get(DEVICE)
+if FB_H is None:
+    sys.exit(f'unknown SWEET_DEVICE={DEVICE!r}')
+FB_BASE, FB_W = 0x9c000000, 1080
 FB_STRIDE = FB_W * 4
 PAGE = 0x4000
 STUB_PA = 0x40200000	# above the dtb QEMU places at RAM base

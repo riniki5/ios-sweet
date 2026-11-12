@@ -3,6 +3,8 @@
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
 address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+
+SWEET_DEVICE selects the panel: sweet (1080x2400) or toco (1080x2340).
 """
 import hashlib, os, struct, sys
 
@@ -30,7 +32,14 @@ GICD, GICD_SIZE = 0x17a00000, 0x10000
 GICR, GICR_SIZE = 0x17a60000, 0x100000
 FB, FB_SIZE = 0x9c000000, 0x1700000
 SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
-FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
+# Panel height per device: sweet (Redmi Note 10 Pro) 1080x2400, toco (Mi Note
+# 10 Lite) 1080x2340. Everything else (splash address, stride, highmem) is the
+# same SM7150/sdmmagpie layout.
+PANEL_H = {'sweet': 2400, 'toco': 2340}
+DEVICE = os.environ.get('SWEET_DEVICE', 'sweet')
+if DEVICE not in PANEL_H:
+    raise SystemExit(f'unknown SWEET_DEVICE={DEVICE!r} (expected {", ".join(PANEL_H)})')
+FB_W, FB_H, FB_STRIDE = 1080, PANEL_H[DEVICE], 1080 * 4
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
