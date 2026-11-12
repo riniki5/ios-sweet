@@ -1240,8 +1240,8 @@
 +			continue;
 +		}
 +		SweetSurface *s = sweet_surface_copy(id);
-+		if (sweet_fb_swaps_logged < 16) {
-+			sweet_fb_swaps_logged++;
++		/* First frames in full, then one sample roughly every 4 s. */
++		if (++sweet_fb_swaps_logged <= 16 || (sweet_fb_swaps_logged % 240u) == 0) {
 +			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
 +			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
 +			    s ? s->pixelFormat : 0, s ? s->bytesPerRow : 0, sx, sy, get32(a, 8),

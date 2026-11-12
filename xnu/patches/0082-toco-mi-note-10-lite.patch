@@ -81,7 +81,7 @@ index 03defe6..0185d4f 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
-@@ -32,6 +36,16 @@ void sweet_touch_init(void);
+@@ -32,6 +36,19 @@ void sweet_touch_init(void);
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
@@ -90,6 +90,9 @@ index 03defe6..0185d4f 100644
 +#define FTM5_ADDR        0x49u
 +#define FTM5_FIFO_READ   0x86u
 +#define FTM5_CMD_SCAN_MODE 0xA0u
++/* Config-memory read: opcode, then a big-endian 16-bit offset. */
++#define FTM5_CMD_CONFIG_R 0xA8u
++#define FTM5_ADDR_CONFIG_ID 0x0010u
 +#define FTM5_EVT_ENTER   0x13u
 +#define FTM5_EVT_MOTION  0x23u
 +#define FTM5_EVT_LEAVE   0x33u
@@ -98,7 +101,7 @@ index 03defe6..0185d4f 100644
  /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
  #define GOODIX_PID_REG   0x4022u
  #define GOODIX_EVENT_REG 0x4180u
-@@ -80,6 +93,10 @@ static struct {
+@@ -80,6 +97,10 @@ static struct {
  	int x[TOUCH_MAX], y[TOUCH_MAX];
  } st;
  static int touch_sleep_chan;
@@ -109,7 +112,7 @@ index 03defe6..0185d4f 100644
  
  static uint32_t
  touch_rd(vm_offset_t base, uint32_t off)
-@@ -425,7 +442,7 @@ touch_goodix(void)
+@@ -425,7 +446,7 @@ touch_goodix(void)
  		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
  		/* Low nibble 1/3 denotes pen data in the vendor parser. */
  		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
@@ -118,7 +121,7 @@ index 03defe6..0185d4f 100644
  			(void)touch_goodix_ack();
  			return EIO;
  		}
-@@ -446,7 +463,7 @@ touch_focaltech(void)
+@@ -446,7 +467,7 @@ touch_focaltech(void)
  	uint8_t buf[63];
  	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
  	uint32_t mask = 0, seen = 0;
@@ -127,7 +130,7 @@ index 03defe6..0185d4f 100644
  	if (err) {
  		return err;
  	}
-@@ -472,7 +489,7 @@ touch_focaltech(void)
+@@ -472,7 +493,7 @@ touch_focaltech(void)
  		}
  		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
  		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
@@ -136,10 +139,35 @@ index 03defe6..0185d4f 100644
  			return EIO;
  		}
  		mask |= 1u << id;
-@@ -487,6 +504,78 @@ touch_focaltech(void)
+@@ -487,6 +508,124 @@ touch_focaltech(void)
  	return 0;
  }
  
++/* Distinct FIFO frames are few; log the first ones verbatim. */
++static unsigned touch_fts_ftm5_seen, touch_fts_ftm5_polls;
++static uint8_t touch_fts_ftm5_last[8];
++
++static void
++touch_fts_ftm5_trace(const uint8_t *e)
++{
++	unsigned same = 1;
++
++	for (unsigned i = 0; i < 8; ++i) {
++		if (e[i] != touch_fts_ftm5_last[i]) {
++			same = 0;
++			touch_fts_ftm5_last[i] = e[i];
++		}
++	}
++	if (same) {
++		return;
++	}
++	if (touch_fts_ftm5_seen++ < 48u) {
++		printf("SWEET TOUCH: fifo %02x %02x %02x %02x %02x %02x %02x %02x rem=%u\n",
++		    e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7],
++		    e[7] & FTM5_EVT_LAST);
++	}
++}
++
 +static int
 +touch_fts_ftm5_frame(int x[], int y[], uint32_t *mask)
 +{
@@ -148,6 +176,7 @@ index 03defe6..0185d4f 100644
 +	if (err) {
 +		return err;
 +	}
++	touch_fts_ftm5_trace(e);
 +	/* event[7] low 5 bits count the events still queued behind this one. */
 +	for (unsigned n = 0; n < FTM5_FIFO_DEPTH; ++n) {
 +		unsigned id = e[1] >> 4, type = e[1] & 15u;
@@ -176,6 +205,7 @@ index 03defe6..0185d4f 100644
 +		if (err) {
 +			return err;
 +		}
++		touch_fts_ftm5_trace(e);
 +	}
 +	return 0;
 +}
@@ -192,6 +222,13 @@ index 03defe6..0185d4f 100644
 +	int err = touch_fts_ftm5_frame(x, y, &mask);
 +	if (!err) {
 +		touch_report(mask, x, y);
++	}
++	/* Silence can mean no-event frames or a stalled poll loop. */
++	if ((++touch_fts_ftm5_polls % 1000u) == 0) {
++		printf("SWEET TOUCH: ftm5 idle polls=%u last=%02x%02x rem=%u irq=%#x\n",
++		    touch_fts_ftm5_polls, touch_fts_ftm5_last[0],
++		    touch_fts_ftm5_last[1], touch_fts_ftm5_last[7] & FTM5_EVT_LAST,
++		    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u);
 +	}
 +	return err;
 +}
@@ -212,10 +249,22 @@ index 03defe6..0185d4f 100644
 +	return err;
 +}
 +
++/* FTS reads with a 16-bit offset: opcode plus a big-endian address. */
++static int
++touch_fts_read3(uint8_t op, uint16_t addr, uint8_t *buf, unsigned len)
++{
++	uint8_t tx[3] = { op, (uint8_t)(addr >> 8), (uint8_t)addr };
++	int err = touch_msg(touch_fts_addr, tx, sizeof(tx), NULL, 0, true);
++	if (err) {
++		return err;
++	}
++	return touch_msg(touch_fts_addr, NULL, 0, buf, len, false);
++}
++
  static bool
  touch_se_init(void)
  {
-@@ -545,6 +634,26 @@ touch_se_init(void)
+@@ -545,6 +684,26 @@ touch_se_init(void)
  	return true;
  }
  
@@ -242,7 +291,7 @@ index 03defe6..0185d4f 100644
  static void
  touch_thread(void *arg, wait_result_t result)
  {
-@@ -569,18 +678,33 @@ touch_thread(void *arg, wait_result_t result)
+@@ -569,18 +728,33 @@ touch_thread(void *arg, wait_result_t result)
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -281,10 +330,14 @@ index 03defe6..0185d4f 100644
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -589,33 +713,50 @@ touch_thread(void *arg, wait_result_t result)
+@@ -589,33 +763,62 @@ touch_thread(void *arg, wait_result_t result)
  	touch_wait(2);
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
++	/* Confirm the reset pulse landed and that the IRQ line idles released. */
++	printf("SWEET TOUCH: after reset reset=%#x irq=%#x vddio=%#x\n",
++	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
++	    touch_rd(st.gpio, TOUCH_GPIO_IO(vddio)));
 -	uint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;
 +	uint8_t gid[32], legacy[32], fm5[8], fid1 = 0, fid2 = 0;
  	st.probing = true;
@@ -322,13 +375,21 @@ index 03defe6..0185d4f 100644
 +	    goodix ? "GT9896 Yellowstone" : ftm5 ? "Focaltech FTM5" : "Focaltech 54:52",
 +	    goodix ? 0x5d : touch_fts_addr, touch_panel_w, touch_panel_h, st.irq_hint);
 +	/*
-+	 * FTM5 boots out of reset with scanning off: the vendor driver
-+	 * sends SCAN_MODE_ACTIVE (0xA0, mode, scan-on) after every reset.
++	 * FTM5 boots out of reset with scanning off: the vendor driver sends
++	 * sense-off then SCAN_MODE_ACTIVE (0xA0, mode, scan-on). The config id
++	 * read proves the 3-byte command path and that the panel config is
++	 * loaded; a zero id means the app firmware has nothing to scan with.
 +	 */
 +	if (st.kind == TOUCH_FTS_FTM5) {
-+		const uint8_t scan_on[3] = { FTM5_CMD_SCAN_MODE, 0x00u, 0x01u };
-+		int so = touch_msg(touch_fts_addr, scan_on, sizeof(scan_on), NULL, 0, false);
-+		printf("SWEET TOUCH: scan mode %s (err=%d)\n", so ? "failed" : "on", so);
++		const uint8_t off[3] = { FTM5_CMD_SCAN_MODE, 0x00u, 0x00u };
++		const uint8_t on[3] = { FTM5_CMD_SCAN_MODE, 0x00u, 0x01u };
++		int e1 = touch_msg(touch_fts_addr, off, sizeof(off), NULL, 0, false);
++		touch_wait(50);
++		int e2 = touch_msg(touch_fts_addr, on, sizeof(on), NULL, 0, false);
++		uint8_t cfg[2] = { 0, 0 };
++		int e3 = touch_fts_read3(FTM5_CMD_CONFIG_R, FTM5_ADDR_CONFIG_ID, cfg, sizeof(cfg));
++		printf("SWEET TOUCH: sense off=%d on=%d cfg %02x%02x err=%d\n",
++		    e1, e2, cfg[0], cfg[1], e3);
 +	}
  	unsigned errors = 0, ticks = 0;
  	while (!st.dead) {

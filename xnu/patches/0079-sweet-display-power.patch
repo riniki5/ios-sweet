@@ -31,10 +31,15 @@
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -216,6 +224,24 @@
+@@ -216,6 +224,29 @@
  		    (IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
  		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
  	}
++	if ((count % 300u) == 0) {
++		/* Five seconds at 60 Hz: is the timer running and are frames arriving? */
++		IOLog("SWEET FB: vsync %llu dirty %d off %d ticks %u\n",
++		    count, fb->fDirty, fb->fPowerOff, fb->fFlushTicks);
++	}
 +	if (fb->fPowerOff) {
 +		/* Fade out: halve every channel each vsync, then black, then idle. */
 +		uint32_t step = fb->fFadeStep;
@@ -56,7 +61,7 @@
  	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
  	uint8_t *rec = NULL;
  	if (flush) {
-@@ -506,6 +532,19 @@
+@@ -506,6 +537,19 @@
  			    args->scalarInput[0] ? "on" : "off");
  		}
  		break;
