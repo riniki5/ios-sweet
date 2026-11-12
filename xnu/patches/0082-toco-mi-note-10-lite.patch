@@ -81,7 +81,7 @@ index 03defe6..0185d4f 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
-@@ -32,6 +36,15 @@ void sweet_touch_init(void);
+@@ -32,6 +36,16 @@ void sweet_touch_init(void);
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
@@ -89,6 +89,7 @@ index 03defe6..0185d4f 100644
 +/* toco's Focaltech FTM5 uses one-byte opcodes and 8-byte FIFO events. */
 +#define FTM5_ADDR        0x49u
 +#define FTM5_FIFO_READ   0x86u
++#define FTM5_CMD_SCAN_MODE 0xA0u
 +#define FTM5_EVT_ENTER   0x13u
 +#define FTM5_EVT_MOTION  0x23u
 +#define FTM5_EVT_LEAVE   0x33u
@@ -280,7 +281,7 @@ index 03defe6..0185d4f 100644
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -589,33 +713,41 @@ touch_thread(void *arg, wait_result_t result)
+@@ -589,33 +713,50 @@ touch_thread(void *arg, wait_result_t result)
  	touch_wait(2);
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
@@ -320,6 +321,15 @@ index 03defe6..0185d4f 100644
 +	printf("SWEET TOUCH: selected %s at 0x%02x, %ux%u, poll=10ms irq-hint=%d\n",
 +	    goodix ? "GT9896 Yellowstone" : ftm5 ? "Focaltech FTM5" : "Focaltech 54:52",
 +	    goodix ? 0x5d : touch_fts_addr, touch_panel_w, touch_panel_h, st.irq_hint);
++	/*
++	 * FTM5 boots out of reset with scanning off: the vendor driver
++	 * sends SCAN_MODE_ACTIVE (0xA0, mode, scan-on) after every reset.
++	 */
++	if (st.kind == TOUCH_FTS_FTM5) {
++		const uint8_t scan_on[3] = { FTM5_CMD_SCAN_MODE, 0x00u, 0x01u };
++		int so = touch_msg(touch_fts_addr, scan_on, sizeof(scan_on), NULL, 0, false);
++		printf("SWEET TOUCH: scan mode %s (err=%d)\n", so ? "failed" : "on", so);
++	}
  	unsigned errors = 0, ticks = 0;
  	while (!st.dead) {
  		/* Optional IRQ hint still reads every 100ms, and always while down. */
