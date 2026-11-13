@@ -36,19 +36,19 @@ index 4da50d8..5dc56fc 100644
 -		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
 +	/*
 +	 * Board-specific helper: do not apply PMIC5-LDO policy to arbitrary
-+	 * resources. The DT gives ldoc11 (sweet touch) 2.95..3.4 V and ldoc6
-+	 * (toco touch) 1.648..3.1 V.
++	 * resources. DT ranges are ldoc11 2.95..3.4 V and ldoc6 1.648..3.1 V;
++	 * RPMh VRM data words are microvolts (Linux writes uV), so call with uV.
 +	 */
 +	unsigned lo = 0, hi = 0;
 +	if (res && !strcmp(res, "ldoc11")) {
-+		lo = 2950;
-+		hi = 3400;
++		lo = 2950000;
++		hi = 3400000;
 +	} else if (res && !strcmp(res, "ldoc6")) {
-+		lo = 1600;
-+		hi = 3100;
++		lo = 1648000;
++		hi = 3100000;
 +	}
 +	if (!hi || mv < lo || mv > hi) {
-+		printf("SWEET RPMH: expected ldoc11 2950..3400 mV or ldoc6 1600..3100 mV\n");
++		printf("SWEET RPMH: expected ldoc11 2950000..3400000 uV or ldoc6 1648000..3100000 uV\n");
  		return EINVAL;
  	}
  	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
@@ -81,7 +81,7 @@ index 03defe6..0185d4f 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
-@@ -32,6 +36,53 @@
+@@ -32,6 +36,54 @@
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
@@ -125,6 +125,7 @@ index 03defe6..0185d4f 100644
 +#define FTS_F_IER_ON     0x41u
 +#define FTS_F_FIFO       0x86u
 +#define FTS_F_SCAN       0xa0u
++#define FTS_F_FBUF       0xa6u
 +#define FTS_F_ACTIVE     0x00u
 +#define FTS_F_MT_BIT     0x01u
 +#define FTS_F_EVT_READY  0x03u
@@ -135,7 +136,7 @@ index 03defe6..0185d4f 100644
  /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
  #define GOODIX_PID_REG   0x4022u
  #define GOODIX_EVENT_REG 0x4180u
-@@ -73,13 +124,17 @@
+@@ -73,13 +125,17 @@
  
  static struct {
  	vm_offset_t se, gcc, gpio;
@@ -154,7 +155,7 @@ index 03defe6..0185d4f 100644
  
  static uint32_t
  touch_rd(vm_offset_t base, uint32_t off)
-@@ -209,12 +264,12 @@
+@@ -209,12 +265,12 @@
  	return st.irq_last;
  }
  
@@ -169,7 +170,7 @@ index 03defe6..0185d4f 100644
  		return EIO;
  	}
  	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
-@@ -247,11 +302,16 @@
+@@ -247,11 +303,16 @@
  			break;
  		}
  		if (nt && !st.sent && (irq & SE_TX_WM_IRQ)) {
@@ -190,7 +191,7 @@ index 03defe6..0185d4f 100644
  			st.sent = nt;
  			touch_wr(st.se, SE_TX_WM, 0);
  		}
-@@ -317,6 +377,40 @@
+@@ -317,6 +378,95 @@
  	return touch_msg(addr, NULL, 0, buf, len, false);
  }
  
@@ -228,10 +229,65 @@ index 03defe6..0185d4f 100644
 +	return touch_msg(FTS_T_ADDR, cmd, sizeof(cmd), NULL, 0, false);
 +}
 +
++/*
++ * FTI framebuffer read: 0xA6, sixteen-bit address, reply starts with one
++ * dummy byte (DUMMY_FRAMEBUFFER=1). Address 0 holds the system info block
++ * the FW refreshes after every reset; its [2..3] counter advances once per
++ * scanned frame, so two reads tell us whether the AFE is taking data.
++ */
++static int
++touch_fti_fbuf(uint16_t addr, uint8_t *buf, unsigned len)
++{
++	uint8_t tx[3] = { FTS_F_FBUF, (uint8_t)(addr >> 8), (uint8_t)addr };
++	uint8_t tmp[1u + 32u];
++
++	if (len + 1u > sizeof(tmp)) {
++		return EINVAL;
++	}
++	int err = touch_msg(FTS_T_ADDR, tx, sizeof(tx), NULL, 0, true);
++	if (err) {
++		return err;
++	}
++	err = touch_msg(FTS_T_ADDR, NULL, 0, tmp, len + 1u, false);
++	if (err) {
++		return err;
++	}
++	memcpy(buf, tmp + 1, len);
++	return 0;
++}
++
++static unsigned
++touch_fti_frames(void)
++{
++	uint8_t h[4];
++
++	if (touch_fti_fbuf(0, h, sizeof(h))) {
++		return 0xffffffffu;
++	}
++	return (unsigned)h[2] | ((unsigned)h[3] << 8);
++}
++
++static void
++touch_fti_ident(void)
++{
++	uint8_t s[32];
++
++	if (touch_fti_fbuf(0, s, sizeof(s))) {
++		printf("SWEET TOUCH: fti sysinfo err\n");
++		return;
++	}
++	unsigned fw = s[16] | ((unsigned)s[17] << 8);
++	unsigned svn = s[18] | ((unsigned)s[19] << 8);
++	unsigned cfg = s[20] | ((unsigned)s[21] << 8);
++
++	printf("SWEET TOUCH: fti sysinfo sig=%02x id=%02x fw=%04x svn=%04x cfg=%04x proto=%02x afe=%02x/%02x/%02x\n",
++	    s[0], s[1], fw, svn, cfg, s[31], s[28], s[29], s[30]);
++}
++
  static int
  touch_goodix_ack(void)
  {
-@@ -425,7 +519,7 @@
+@@ -425,7 +575,7 @@
  		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
  		/* Low nibble 1/3 denotes pen data in the vendor parser. */
  		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
@@ -240,7 +296,7 @@ index 03defe6..0185d4f 100644
  			(void)touch_goodix_ack();
  			return EIO;
  		}
-@@ -446,7 +540,7 @@
+@@ -446,7 +596,7 @@
  	uint8_t buf[63];
  	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
  	uint32_t mask = 0, seen = 0;
@@ -249,7 +305,7 @@ index 03defe6..0185d4f 100644
  	if (err) {
  		return err;
  	}
-@@ -472,7 +566,7 @@
+@@ -472,7 +622,7 @@
  		}
  		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
  		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
@@ -258,7 +314,7 @@ index 03defe6..0185d4f 100644
  			return EIO;
  		}
  		mask |= 1u << id;
-@@ -487,6 +581,246 @@
+@@ -487,6 +637,246 @@
  	return 0;
  }
  
@@ -441,11 +497,11 @@ index 03defe6..0185d4f 100644
 +		touch_report(mask, x, y);
 +	}
 +	if ((++touch_fti_polls % 1000u) == 0) {
-+		printf("SWEET TOUCH: fti polls=%u last=%02x%02x irq=%#x enter=%u motion=%u leave=%u status=%u err=%u\n",
++		printf("SWEET TOUCH: fti polls=%u last=%02x%02x irq=%#x enter=%u motion=%u leave=%u status=%u err=%u frames=%u\n",
 +		    touch_fti_polls, touch_fti_last[0], touch_fti_last[1],
 +		    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u,
 +		    touch_fti_ev[1], touch_fti_ev[2], touch_fti_ev[3],
-+		    touch_fti_ev[4], touch_fti_ev[15]);
++		    touch_fti_ev[4], touch_fti_ev[15], touch_fti_frames());
 +	}
 +	return err;
 +}
@@ -505,7 +561,7 @@ index 03defe6..0185d4f 100644
  static bool
  touch_se_init(void)
  {
-@@ -546,6 +880,26 @@
+@@ -546,6 +936,26 @@
  }
  
  static void
@@ -532,7 +588,7 @@ index 03defe6..0185d4f 100644
  touch_thread(void *arg, wait_result_t result)
  {
  	unsigned delay_s = 45;
-@@ -569,18 +923,33 @@
+@@ -569,18 +979,34 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -552,13 +608,14 @@ index 03defe6..0185d4f 100644
 -	if (power_error) {
 +	/*
 +	 * sweet (GT9896): L11C 3.2 V, GPIO90 digital enable. toco (FTS):
-+	 * PM6150L L6 at the DT init voltage (1.648 V), VDDIO on GPIO72; the
-+	 * stock driver only enables the rail too. An inherited firmware vote
-+	 * makes the helper return EBUSY; the rail is then already up, so on
-+	 * toco log it and keep probing.
++	 * PM6150L L6, VDDIO on GPIO72. The DT init voltage for L6 is 1.648 V
++	 * (its minimum), but the vendor driver never votes a voltage: it only
++	 * enables the rail and inherits the 3.0 V state recovery reports for
++	 * the working IC. Voting 1.648 V leaves the digital core alive (I2C
++	 * and FW both answer) while the analog front end stays dead.
 +	 */
-+	int power_error = toco ? sweet_rpmh_vreg_enable("ldoc6", 1648) :
-+	    sweet_rpmh_vreg_enable("ldoc11", 3200);
++	int power_error = toco ? sweet_rpmh_vreg_enable("ldoc6", 3000000) :
++	    sweet_rpmh_vreg_enable("ldoc11", 3200000);
 +	if (power_error && !toco) {
  		printf("SWEET TOUCH: L11C RPMh enable failed %d; probes skipped\n", power_error);
  		goto out;
@@ -571,7 +628,7 @@ index 03defe6..0185d4f 100644
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -589,39 +958,94 @@
+@@ -589,39 +1015,100 @@
  	touch_wait(2);
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
@@ -625,7 +682,7 @@ index 03defe6..0185d4f 100644
 +	 * silent FIFO then means the IC itself is not running.
 +	 */
 +	if (st.kind == TOUCH_FTS_TOCO) {
-+		uint8_t id[4] = { 0, 0, 0, 0 }, fw[2] = { 0, 0 }, ier = 0;
++		uint8_t id[4] = { 0, 0, 0, 0 }, fw[2] = { 0, 0 };
 +		touch_dump_pins("pre-init");
 +		st.fti = true;
 +		bool ready = touch_fti_reset();
@@ -634,13 +691,19 @@ index 03defe6..0185d4f 100644
 +		printf("SWEET TOUCH: fti reset=%d id err=%d %02x %02x fw err=%d %02x%02x irq=%#x\n",
 +		    ready, ie, id[0], id[1], fe, fw[0], fw[1],
 +		    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u);
-+		int we = touch_fti_write(FTS_F_IER, FTS_F_IER_ON);
-+		int re = touch_fti_read(FTS_F_IER, &ier, 1);
-+		/* The FW scans by default after reset; the vendor never sends 0xA0
-+		 * on boot, so this is only a nudge in case something stopped it. */
++		/*
++		 * The vendor never writes IER, and its FOD builds restart sensing
++		 * with a scan off/on pair after the mode handler. Mirror that
++		 * instead of nudging a register the FW owns.
++		 */
++		int soff = touch_fti_sense(false);
++		touch_wait(10);
 +		int son = touch_fti_sense(true);
-+		printf("SWEET TOUCH: fti ier write=%d read=%d %02x sense=%d dead=%d\n",
-+		    we, re, ier, son, st.dead);
++		printf("SWEET TOUCH: fti scan off=%d on=%d dead=%d\n", soff, son, st.dead);
++		touch_fti_ident();
++		unsigned f0 = touch_fti_frames();
++		touch_wait(100);
++		printf("SWEET TOUCH: fti frames %u -> %u in 100 ms\n", f0, touch_fti_frames());
 +		uint8_t e[8];
 +		for (unsigned i = 0; i < 5; ++i) {
 +			touch_wait(100);
