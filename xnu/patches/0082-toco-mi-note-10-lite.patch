@@ -81,7 +81,7 @@ index 03defe6..0185d4f 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
-@@ -32,6 +36,20 @@ void sweet_touch_init(void);
+@@ -32,6 +36,32 @@
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
@@ -99,10 +99,22 @@ index 03defe6..0185d4f 100644
 +#define FTS_T_EVT_READY  0x10u
 +#define FTS_T_FIFO_DEPTH 32u
 +#define FTS_T_REG_READ   0xb6u
++#define FTS_T_FLUSH      0xa1u
++#define FTS_T_READ_ALL   0x86u
++/* st,fts HW registers: one dummy byte precedes every register read. */
++#define FTS_T_CFG_ADDR   0x0001u
++#define FTS_T_ID_ADDR    0x0004u
++#define FTS_T_FW_ADDR    0x0008u
++#define FTS_T_ID_OLD     0x0007u
++#define FTS_T_FW_OLD     0x000au
++#define FTS_T_RESET_ADDR 0x0028u
++#define FTS_T_RESET_VAL  0x80u
++#define FTS_T_IER_ADDR   0x002cu
++#define FTS_T_IER_ON     0x41u
  /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
  #define GOODIX_PID_REG   0x4022u
  #define GOODIX_EVENT_REG 0x4180u
-@@ -80,6 +98,10 @@ static struct {
+@@ -80,6 +110,10 @@
  	int x[TOUCH_MAX], y[TOUCH_MAX];
  } st;
  static int touch_sleep_chan;
@@ -113,7 +125,22 @@ index 03defe6..0185d4f 100644
  
  static uint32_t
  touch_rd(vm_offset_t base, uint32_t off)
-@@ -425,7 +447,7 @@ touch_goodix(void)
+@@ -209,12 +243,12 @@
+ 	return st.irq_last;
+ }
+ 
+-/* One Linux-style FIFO message. TX is at most 3 bytes; RX at most 90. */
++/* One Linux-style FIFO message. TX is at most 4 bytes; RX at most 90. */
+ static int
+ touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+     unsigned nr, bool stretch)
+ {
+-	if (st.dead || nt > 3 || nr > 90 || (nt && nr) || (!nt && !nr)) {
++	if (st.dead || nt > 4 || nr > 90 || (nt && nr) || (!nt && !nr)) {
+ 		return EIO;
+ 	}
+ 	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
+@@ -425,7 +459,7 @@
  		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
  		/* Low nibble 1/3 denotes pen data in the vendor parser. */
  		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
@@ -122,7 +149,7 @@ index 03defe6..0185d4f 100644
  			(void)touch_goodix_ack();
  			return EIO;
  		}
-@@ -446,7 +468,7 @@ touch_focaltech(void)
+@@ -446,7 +480,7 @@
  	uint8_t buf[63];
  	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
  	uint32_t mask = 0, seen = 0;
@@ -131,7 +158,7 @@ index 03defe6..0185d4f 100644
  	if (err) {
  		return err;
  	}
-@@ -472,7 +494,7 @@ touch_focaltech(void)
+@@ -472,7 +506,7 @@
  		}
  		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
  		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
@@ -140,7 +167,7 @@ index 03defe6..0185d4f 100644
  			return EIO;
  		}
  		mask |= 1u << id;
-@@ -487,6 +509,159 @@ touch_focaltech(void)
+@@ -487,6 +521,240 @@
  	return 0;
  }
  
@@ -257,6 +284,89 @@ index 03defe6..0185d4f 100644
 +	return err;
 +}
 +
++/* HW register write: same 0xB6 opcode, address, then the value byte. */
++static int
++touch_fts_toco_reg_write(uint16_t addr, uint8_t val)
++{
++	uint8_t tx[4] = { FTS_T_REG_READ, (uint8_t)(addr >> 8), (uint8_t)addr, val };
++
++	return touch_msg(FTS_T_ADDR, tx, sizeof(tx), NULL, 0, false);
++}
++
++/* TLMM: io bit 0 is the pin level, bit 1 the output latch (out_bit=1 here). */
++static void
++touch_dump_pins(const char *where)
++{
++	static unsigned const pins[] = { 6, 7, 8, 9, 72 };
++
++	printf("SWEET TOUCH: pins %s", where);
++	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
++		printf(" p%u cfg=%#x io=%#x", pins[i],
++		    touch_rd(st.gpio, TOUCH_GPIO_CFG(pins[i])) & 0x3ffu,
++		    touch_rd(st.gpio, TOUCH_GPIO_IO(pins[i])) & 3u);
++	}
++	printf("\n");
++}
++
++/*
++ * Three ways to read the FIFO. The stock driver writes 0x85 and reads in one
++ * transfer (repeated START, what our stretched write does); the other shapes
++ * are here to tell a protocol mismatch from an IC that never fills its FIFO.
++ */
++static void
++touch_fts_toco_shapes(const char *where)
++{
++	uint8_t cmd = FTS_T_FIFO_READ;
++	uint8_t a[8] = { 0 }, b[8] = { 0 }, c[9] = { 0 }, d[8] = { 0 };
++	int e1 = touch_read(FTS_T_ADDR, FTS_T_FIFO_READ, false, a, sizeof(a));
++	int e2 = touch_msg(FTS_T_ADDR, &cmd, 1, NULL, 0, false);
++	if (!e2) {
++		e2 = touch_msg(FTS_T_ADDR, NULL, 0, b, sizeof(b), false);
++	}
++	int e3 = touch_msg(FTS_T_ADDR, &cmd, 1, NULL, 0, true);
++	if (!e3) {
++		e3 = touch_msg(FTS_T_ADDR, NULL, 0, c, sizeof(c), false);
++	}
++	int e4 = touch_read(FTS_T_ADDR, FTS_T_READ_ALL, false, d, sizeof(d));
++	printf("SWEET TOUCH: %s fifo joined=%d %02x %02x %02x %02x split=%d %02x %02x %02x %02x wide=%d %02x %02x %02x %02x %02x all=%d %02x %02x %02x %02x\n",
++	    where, e1, a[0], a[1], a[2], a[3], e2, b[0], b[1], b[2], b[3],
++	    e3, c[0], c[1], c[2], c[3], c[4], e4, d[0], d[1], d[2], d[3]);
++}
++
++static void
++touch_fts_toco_log_regs(const char *where)
++{
++	uint8_t id[2] = { 0, 0 }, fwv[2] = { 0, 0 }, cfg[2] = { 0, 0 }, ier[2] = { 0, 0 };
++	int e1 = touch_fts_toco_reg(FTS_T_ID_ADDR, id, sizeof(id));
++	int e2 = touch_fts_toco_reg(FTS_T_FW_ADDR, fwv, sizeof(fwv));
++	int e3 = touch_fts_toco_reg(FTS_T_CFG_ADDR, cfg, sizeof(cfg));
++	int e4 = touch_fts_toco_reg(FTS_T_IER_ADDR, ier, sizeof(ier));
++	printf("SWEET TOUCH: %s id=%d %02x%02x fw=%d %02x%02x cfg=%d %02x%02x ier=%d %02x%02x irq=%#x\n",
++	    where, e1, id[0], id[1], e2, fwv[0], fwv[1], e3, cfg[0], cfg[1],
++	    e4, ier[0], ier[1], touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 3u);
++}
++
++/* Wait up to ms for a control-ready event; log the first attempts. */
++static bool
++touch_fts_toco_wait_ready(const char *where, unsigned ms)
++{
++	uint8_t e[8];
++
++	for (unsigned i = 0; i < ms / 25u; ++i) {
++		touch_wait(25);
++		int err = touch_read(FTS_T_ADDR, FTS_T_FIFO_READ, false, e, sizeof(e));
++		if (i < 4u || (i % 20u) == 0) {
++			printf("SWEET TOUCH: %s poll %u err=%d evt=%02x %02x %02x irq=%#x\n",
++			    where, i, err, e[0], e[1], e[2],
++			    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 3u);
++		}
++		if (!err && e[0] == FTS_T_EVT_READY) {
++			return true;
++		}
++	}
++	return false;
++}
++
 +/*
 + * The vendor always pulses reset (20 ms low) and then waits for the 0x10
 + * control-ready event before enabling sensing; a chip that was never
@@ -265,19 +375,17 @@ index 03defe6..0185d4f 100644
 +static bool
 +touch_fts_toco_reset(void)
 +{
-+	uint8_t e[8];
-+
 +	touch_wr(st.gpio, TOUCH_GPIO_IO(8), 2u);
 +	touch_wait(20);
 +	touch_wr(st.gpio, TOUCH_GPIO_IO(8), 3u);
-+	for (unsigned i = 0; i < 40; ++i) {
-+		touch_wait(25);
-+		if (!touch_read(FTS_T_ADDR, FTS_T_FIFO_READ, false, e, sizeof(e)) &&
-+		    e[0] == FTS_T_EVT_READY) {
-+			return true;
-+		}
++	bool ready = touch_fts_toco_wait_ready("reset", 1500);
++	if (!ready) {
++		/* Same reset through the register, the vendor's no-GPIO path. */
++		int err = touch_fts_toco_reg_write(FTS_T_RESET_ADDR, FTS_T_RESET_VAL);
++		printf("SWEET TOUCH: reg reset=%d, waiting again\n", err);
++		ready = touch_fts_toco_wait_ready("regreset", 1000);
 +	}
-+	return false;
++	return ready;
 +}
 +
 +static int
@@ -300,11 +408,10 @@ index 03defe6..0185d4f 100644
  static bool
  touch_se_init(void)
  {
-@@ -545,6 +720,26 @@ touch_se_init(void)
- 	return true;
+@@ -546,6 +814,26 @@
  }
  
-+static void
+ static void
 +touch_panel_geometry(void)
 +{
 +	DTEntry entry;
@@ -324,10 +431,11 @@ index 03defe6..0185d4f 100644
 +	}
 +}
 +
- static void
++static void
  touch_thread(void *arg, wait_result_t result)
  {
-@@ -569,18 +764,33 @@ touch_thread(void *arg, wait_result_t result)
+ 	unsigned delay_s = 45;
+@@ -569,18 +857,33 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -366,15 +474,16 @@ index 03defe6..0185d4f 100644
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -589,33 +799,63 @@ touch_thread(void *arg, wait_result_t result)
+@@ -589,33 +892,79 @@
  	touch_wait(2);
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
+-	uint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;
 +	/* Confirm the reset pulse landed and that the IRQ line idles released. */
 +	printf("SWEET TOUCH: after reset reset=%#x irq=%#x vddio=%#x\n",
 +	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
 +	    touch_rd(st.gpio, TOUCH_GPIO_IO(vddio)));
--	uint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;
++	touch_dump_pins("probe");
 +	uint8_t gid[32], legacy[32], tco_evt[8] = {0}, fid1 = 0, fid2 = 0;
  	st.probing = true;
  	int ge = touch_probe_info(GOODIX_PID_REG, gid);
@@ -414,19 +523,34 @@ index 03defe6..0185d4f 100644
 +	/*
 +	 * A chip that is never pulsed out of reset answers I2C but never scans,
 +	 * so follow the vendor: read the digital chip id, pulse reset, wait for
-+	 * control-ready, then enable sensing.
++	 * control-ready, then enable sensing. Each step is logged: a register
++	 * that reads back what was written proves the read path, a zero id or a
++	 * silent FIFO then means the IC itself is not running.
 +	 */
 +	if (st.kind == TOUCH_FTS_TOCO) {
-+		uint8_t id[2] = { 0, 0 }, fwv[2] = { 0, 0 };
-+		uint8_t on = FTS_T_SENSE_ON;
-+		int ie = touch_fts_toco_reg(0x0004u, id, sizeof(id));
-+		int fe = touch_fts_toco_reg(0x0008u, fwv, sizeof(fwv));
-+		printf("SWEET TOUCH: reg id err=%d %02x%02x fw err=%d %02x%02x\n",
-+		    ie, id[0], id[1], fe, fwv[0], fwv[1]);
++		uint8_t off = FTS_T_SENSE_OFF, on = FTS_T_SENSE_ON, flush = FTS_T_FLUSH;
++		touch_dump_pins("pre-init");
++		touch_fts_toco_log_regs("pre");
 +		bool ready = touch_fts_toco_reset();
-+		int e1 = touch_msg(FTS_T_ADDR, &on, 1, NULL, 0, false);
-+		printf("SWEET TOUCH: reset ready=%d sense on=%d irq=%#x\n",
-+		    ready, e1, touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u);
++		printf("SWEET TOUCH: reset ready=%d\n", ready);
++		touch_dump_pins("post-reset");
++		touch_fts_toco_log_regs("post");
++		uint8_t old[2] = { 0, 0 };
++		int oe = touch_fts_toco_reg(FTS_T_ID_OLD, old, sizeof(old));
++		printf("SWEET TOUCH: old id addr=%d %02x%02x\n", oe, old[0], old[1]);
++		int f1 = touch_msg(FTS_T_ADDR, &flush, 1, NULL, 0, false);
++		int f2 = touch_msg(FTS_T_ADDR, &off, 1, NULL, 0, false);
++		touch_wait(50);
++		int f3 = touch_msg(FTS_T_ADDR, &on, 1, NULL, 0, false);
++		printf("SWEET TOUCH: flush=%d sense off=%d on=%d\n", f1, f2, f3);
++		for (unsigned i = 0; i < 5; ++i) {
++			touch_wait(100);
++			touch_fts_toco_shapes(i == 0 ? "post-sense" : "post-sense+");
++		}
++		/* Last, because a 4-byte register write is the one untested shape. */
++		int we = touch_fts_toco_reg_write(FTS_T_IER_ADDR, FTS_T_IER_ON);
++		touch_fts_toco_log_regs("ier");
++		printf("SWEET TOUCH: ier write=%d dead=%d\n", we, st.dead);
 +	}
  	unsigned errors = 0, ticks = 0;
  	while (!st.dead) {
