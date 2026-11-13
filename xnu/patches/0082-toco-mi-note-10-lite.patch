@@ -191,7 +191,7 @@ index 03defe6..0185d4f 100644
  			st.sent = nt;
  			touch_wr(st.se, SE_TX_WM, 0);
  		}
-@@ -317,6 +378,148 @@
+@@ -317,6 +378,162 @@
  	return touch_msg(addr, NULL, 0, buf, len, false);
  }
  
@@ -230,30 +230,23 @@ index 03defe6..0185d4f 100644
 +}
 +
 +/*
-+ * FTI framebuffer read: 0xA6, sixteen-bit address, reply starts with one
-+ * dummy byte (DUMMY_FRAMEBUFFER=1). Address 0 holds the data header the FW
-+ * reloads after every reset: signature, data id, then a little-endian count
-+ * that moves when the host asks for fresh data.
++ * FTI framebuffer read: 0xA6, sixteen-bit address, then exactly len bytes.
++ * The vendor sets DUMMY_FRAMEBUFFER=0 for the I2C interface
++ * (f521_ftsHardware.h:143); dropping a lead byte shifted every field by one.
++ * Address 0 holds the data header the FW reloads after every reset:
++ * signature, data id, then a little-endian count that moves when the host
++ * asks for fresh data.
 + */
 +static int
 +touch_fti_fbuf(uint16_t addr, uint8_t *buf, unsigned len)
 +{
 +	uint8_t tx[3] = { FTS_F_FBUF, (uint8_t)(addr >> 8), (uint8_t)addr };
-+	uint8_t tmp[1u + 32u];
 +
-+	if (len + 1u > sizeof(tmp)) {
-+		return EINVAL;
-+	}
 +	int err = touch_msg(FTS_T_ADDR, tx, sizeof(tx), NULL, 0, true);
 +	if (err) {
 +		return err;
 +	}
-+	err = touch_msg(FTS_T_ADDR, NULL, 0, tmp, len + 1u, false);
-+	if (err) {
-+		return err;
-+	}
-+	memcpy(buf, tmp + 1, len);
-+	return 0;
++	return touch_msg(FTS_T_ADDR, NULL, 0, buf, len, false);
 +}
 +
 +static unsigned
@@ -270,7 +263,7 @@ index 03defe6..0185d4f 100644
 +static void
 +touch_fti_ident(void)
 +{
-+	uint8_t s[32];
++	uint8_t s[32], cfg[8], addr[8];
 +
 +	if (touch_fti_fbuf(0, s, sizeof(s))) {
 +		printf("SWEET TOUCH: fti sysinfo err\n");
@@ -278,10 +271,31 @@ index 03defe6..0185d4f 100644
 +	}
 +	unsigned fw = s[16] | ((unsigned)s[17] << 8);
 +	unsigned svn = s[18] | ((unsigned)s[19] << 8);
-+	unsigned cfg = s[20] | ((unsigned)s[21] << 8);
++	unsigned cfgv = s[20] | ((unsigned)s[21] << 8);
 +
 +	printf("SWEET TOUCH: fti sysinfo sig=%02x id=%02x fw=%04x svn=%04x cfg=%04x proto=%02x afe=%02x/%02x/%02x\n",
-+	    s[0], s[1], fw, svn, cfg, s[31], s[28], s[29], s[30]);
++	    s[0], s[1], fw, svn, cfgv, s[31], s[28], s[29], s[30]);
++	printf("SWEET TOUCH: fti sysinfo0 %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
++	    s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9],
++	    s[10], s[11], s[12], s[13], s[14], s[15]);
++	printf("SWEET TOUCH: fti sysinfo1 %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
++	    s[16], s[17], s[18], s[19], s[20], s[21], s[22], s[23],
++	    s[24], s[25], s[26], s[27], s[28], s[29], s[30], s[31]);
++	/* Source resolution 80..83, then tx/rx/key/force node counts. */
++	if (!touch_fti_fbuf(80, cfg, sizeof(cfg))) {
++		unsigned rx = (unsigned)cfg[0] | ((unsigned)cfg[1] << 8);
++		unsigned ry = (unsigned)cfg[2] | ((unsigned)cfg[3] << 8);
++		printf("SWEET TOUCH: fti panel %ux%u tx=%u rx=%u key=%u force=%u\n",
++		    rx, ry, cfg[4], cfg[5], cfg[6], cfg[7]);
++	}
++	/* Touch frame pointers: raw, filter, strength, baseline. */
++	if (!touch_fti_fbuf(136, addr, sizeof(addr))) {
++		printf("SWEET TOUCH: fti frame addr raw=%04x filter=%04x stren=%04x base=%04x\n",
++		    (unsigned)addr[0] | ((unsigned)addr[1] << 8),
++		    (unsigned)addr[2] | ((unsigned)addr[3] << 8),
++		    (unsigned)addr[4] | ((unsigned)addr[5] << 8),
++		    (unsigned)addr[6] | ((unsigned)addr[7] << 8));
++	}
 +}
 +
 +/*
@@ -323,7 +337,7 @@ index 03defe6..0185d4f 100644
 +	printf("SWEET TOUCH: fti raw req=%d count %u->%u hdr=%02x %02x\n",
 +	    err, before, after, h[0], h[1]);
 +	if (after != before) {
-+		for (unsigned off = 4; off < 44; off += 20) {
++		for (unsigned off = 4; off < 84; off += 20) {
 +			if (touch_fti_fbuf((uint16_t)off, buf, sizeof(buf))) {
 +				break;
 +			}
@@ -340,7 +354,7 @@ index 03defe6..0185d4f 100644
  static int
  touch_goodix_ack(void)
  {
-@@ -425,7 +628,7 @@
+@@ -425,7 +642,7 @@
  		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
  		/* Low nibble 1/3 denotes pen data in the vendor parser. */
  		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
@@ -349,7 +363,7 @@ index 03defe6..0185d4f 100644
  			(void)touch_goodix_ack();
  			return EIO;
  		}
-@@ -446,7 +649,7 @@
+@@ -446,7 +663,7 @@
  	uint8_t buf[63];
  	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
  	uint32_t mask = 0, seen = 0;
@@ -358,7 +372,7 @@ index 03defe6..0185d4f 100644
  	if (err) {
  		return err;
  	}
-@@ -472,7 +675,7 @@
+@@ -472,7 +689,7 @@
  		}
  		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
  		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
@@ -367,7 +381,7 @@ index 03defe6..0185d4f 100644
  			return EIO;
  		}
  		mask |= 1u << id;
-@@ -487,6 +690,246 @@
+@@ -487,6 +704,246 @@
  	return 0;
  }
  
@@ -614,7 +628,7 @@ index 03defe6..0185d4f 100644
  static bool
  touch_se_init(void)
  {
-@@ -546,6 +989,26 @@
+@@ -546,6 +1003,26 @@
  }
  
  static void
@@ -641,7 +655,7 @@ index 03defe6..0185d4f 100644
  touch_thread(void *arg, wait_result_t result)
  {
  	unsigned delay_s = 45;
-@@ -569,18 +1032,34 @@
+@@ -569,18 +1046,34 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -681,7 +695,7 @@ index 03defe6..0185d4f 100644
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -589,39 +1068,98 @@
+@@ -589,39 +1082,98 @@
  	touch_wait(2);
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
