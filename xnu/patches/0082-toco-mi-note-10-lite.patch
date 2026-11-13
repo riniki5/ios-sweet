@@ -169,7 +169,28 @@ index 03defe6..0185d4f 100644
  		return EIO;
  	}
  	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
-@@ -317,6 +372,40 @@
+@@ -247,11 +302,16 @@
+ 			break;
+ 		}
+ 		if (nt && !st.sent && (irq & SE_TX_WM_IRQ)) {
+-			uint32_t word = 0;
+-			for (unsigned j = 0; j < nt; ++j) {
+-				word |= (uint32_t)tx[j] << (8u * j);
++			/* SE_TX is a 32-bit port: FTI's 5-byte pointer needs two words,
++			 * otherwise the master clocks a byte the FIFO never gets and
++			 * every register access times out. */
++			for (unsigned off = 0; off < nt; off += 4) {
++				uint32_t word = 0;
++				for (unsigned j = 0; j < 4 && off + j < nt; ++j) {
++					word |= (uint32_t)tx[off + j] << (8u * j);
++				}
++				touch_wr(st.se, SE_TX, word);
+ 			}
+-			touch_wr(st.se, SE_TX, word);
+ 			st.sent = nt;
+ 			touch_wr(st.se, SE_TX_WM, 0);
+ 		}
+@@ -317,6 +377,40 @@
  	return touch_msg(addr, NULL, 0, buf, len, false);
  }
  
@@ -210,7 +231,7 @@ index 03defe6..0185d4f 100644
  static int
  touch_goodix_ack(void)
  {
-@@ -425,7 +514,7 @@
+@@ -425,7 +519,7 @@
  		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
  		/* Low nibble 1/3 denotes pen data in the vendor parser. */
  		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
@@ -219,7 +240,7 @@ index 03defe6..0185d4f 100644
  			(void)touch_goodix_ack();
  			return EIO;
  		}
-@@ -446,7 +535,7 @@
+@@ -446,7 +540,7 @@
  	uint8_t buf[63];
  	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
  	uint32_t mask = 0, seen = 0;
@@ -228,7 +249,7 @@ index 03defe6..0185d4f 100644
  	if (err) {
  		return err;
  	}
-@@ -472,7 +561,7 @@
+@@ -472,7 +566,7 @@
  		}
  		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
  		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
@@ -237,7 +258,7 @@ index 03defe6..0185d4f 100644
  			return EIO;
  		}
  		mask |= 1u << id;
-@@ -487,6 +576,228 @@
+@@ -487,6 +581,246 @@
  	return 0;
  }
  
@@ -348,7 +369,21 @@ index 03defe6..0185d4f 100644
 +}
 +
 +static unsigned touch_fti_polls;
++static unsigned touch_fti_ev[16];
++static unsigned touch_fti_traced;
 +static uint8_t touch_fti_last[2];
++
++static void
++touch_fti_trace(const uint8_t *e)
++{
++	if (e[0] == FTS_T_EVT_NONE || touch_fti_traced >= 48u) {
++		return;
++	}
++	++touch_fti_traced;
++	printf("SWEET TOUCH: fti evt %02x %02x %02x %02x %02x %02x %02x %02x irq=%#x\n",
++	    e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7],
++	    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u);
++}
 +
 +static int
 +touch_fti_frame(int x[], int y[], uint32_t *mask)
@@ -365,6 +400,8 @@ index 03defe6..0185d4f 100644
 +		if (e[0] == FTS_T_EVT_NONE) {
 +			break;
 +		}
++		++touch_fti_ev[e[0] >> 4];
++		touch_fti_trace(e);
 +		unsigned id = e[1] >> 4;
 +		if (id >= TOUCH_MAX) {
 +			return EIO;
@@ -404,9 +441,11 @@ index 03defe6..0185d4f 100644
 +		touch_report(mask, x, y);
 +	}
 +	if ((++touch_fti_polls % 1000u) == 0) {
-+		printf("SWEET TOUCH: fti polls=%u last=%02x%02x irq=%#x\n",
++		printf("SWEET TOUCH: fti polls=%u last=%02x%02x irq=%#x enter=%u motion=%u leave=%u status=%u err=%u\n",
 +		    touch_fti_polls, touch_fti_last[0], touch_fti_last[1],
-+		    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u);
++		    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u,
++		    touch_fti_ev[1], touch_fti_ev[2], touch_fti_ev[3],
++		    touch_fti_ev[4], touch_fti_ev[15]);
 +	}
 +	return err;
 +}
@@ -466,7 +505,7 @@ index 03defe6..0185d4f 100644
  static bool
  touch_se_init(void)
  {
-@@ -546,6 +857,26 @@
+@@ -546,6 +880,26 @@
  }
  
  static void
@@ -493,7 +532,7 @@ index 03defe6..0185d4f 100644
  touch_thread(void *arg, wait_result_t result)
  {
  	unsigned delay_s = 45;
-@@ -569,18 +900,33 @@
+@@ -569,18 +923,33 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -532,7 +571,7 @@ index 03defe6..0185d4f 100644
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -589,39 +935,94 @@
+@@ -589,39 +958,94 @@
  	touch_wait(2);
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
@@ -592,23 +631,23 @@ index 03defe6..0185d4f 100644
 +		bool ready = touch_fti_reset();
 +		int ie = touch_fti_read(FTS_F_ID, id, sizeof(id));
 +		int fe = touch_fti_read(FTS_F_FW, fw, sizeof(fw));
-+		printf("SWEET TOUCH: fti reset=%d id err=%d %02x %02x %02x %02x fw err=%d %02x%02x irq=%#x\n",
-+		    ready, ie, id[0], id[1], id[2], id[3], fe, fw[0], fw[1],
-+		    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 3u);
++		printf("SWEET TOUCH: fti reset=%d id err=%d %02x %02x fw err=%d %02x%02x irq=%#x\n",
++		    ready, ie, id[0], id[1], fe, fw[0], fw[1],
++		    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u);
 +		int we = touch_fti_write(FTS_F_IER, FTS_F_IER_ON);
 +		int re = touch_fti_read(FTS_F_IER, &ier, 1);
-+		int soff = touch_fti_sense(false);
-+		touch_wait(20);
++		/* The FW scans by default after reset; the vendor never sends 0xA0
++		 * on boot, so this is only a nudge in case something stopped it. */
 +		int son = touch_fti_sense(true);
-+		printf("SWEET TOUCH: fti ier write=%d read=%d %02x sense off=%d on=%d dead=%d\n",
-+		    we, re, ier, soff, son, st.dead);
++		printf("SWEET TOUCH: fti ier write=%d read=%d %02x sense=%d dead=%d\n",
++		    we, re, ier, son, st.dead);
 +		uint8_t e[8];
-+		for (unsigned i = 0; i < 3; ++i) {
++		for (unsigned i = 0; i < 5; ++i) {
 +			touch_wait(100);
 +			int err = touch_read(FTS_T_ADDR, FTS_F_FIFO, false, e, sizeof(e));
 +			printf("SWEET TOUCH: fti fifo err=%d evt=%02x %02x %02x %02x %02x irq=%#x\n",
 +			    err, e[0], e[1], e[2], e[3], e[4],
-+			    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 3u);
++			    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u);
 +		}
 +	}
  	unsigned errors = 0, ticks = 0;
