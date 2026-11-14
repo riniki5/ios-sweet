@@ -1,5 +1,57 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Toco port handoff (2026-11-14, latest)
+
+Toco = Xiaomi Mi Note 10 Lite (SM7150G, 1080x2340). Same XNU/shim as sweet, fork
+`riniki5/ios-sweet`, branch `toco`; 0082-toco-mi-note-10-lite.patch carries the
+panel size, RPMh touch rail, Focaltech/Goodix FTI driver and HID panel size.
+
+**State.** SpringBoard runs (last built kernel 26afe33, CI run 43528432343).
+Display renders but shows a single frame after display off/on. Touch is dead:
+the FTI IC answers at 0x49 (dchip id 0x3639, fw 0x8100, sysinfo sig a5, cfg/cx/
+panel afe 03/03/03), reset and FTI reads work, the FW echoes our commands
+(`43 01 a0 00 01` = echo of scan-on {A0 00 01}) and loads sync frames (header
+a5 30), but the FIFO never delivers ENTER/MOTION/LEAVE (all zero for a whole
+boot with fingers on the panel). Force-cal status events (`43 05`) appear after
+each probe.
+
+**Unbuilt on purpose until CI returns.** e1bed3d mirrors the vendor raw-capture
+sequence (scan+s settle, stop, flush, request; locked scan; no-cal scan; panel
+init + reset) and fingerprints the raw buffer at the address sysinfo names
+instead of fbuf+4 (fbuf+4 was static across reprobes, so it is not the live
+frame). 1065de6 adds present-skip counters and repaints the last frame on
+power-on.
+
+**Blocker: GitHub Actions is disabled for `riniki5/ios-sweet`** ("Actions has
+been disabled for this repository", HTTP 422 for workflow_dispatch on both main
+and toco; a real push to `xnu/patches/**` produced no run; repo is not archived
+and `actions/permissions` says enabled/all). Only the repository owner can
+restore it (Settings -> Actions, or GitHub support). Everything committed after
+26afe33 is unbuilt; XNU cannot be built locally (work-toco/bt is a CI buildtree
+for `clang -fsyntax-only` only, see work-toco/cc-check.sh).
+
+**Next run.** Build e1bed3d + 1065de6, rebuild the shim, `fastboot boot` only,
+touch the panel, pull the console. Read `fti cap/capraw/lock0/lock1/nocal/
+pinit` fingerprint sums and `fti live` (every 3 s, real raw address): sums that
+move with a finger mean the AFE scans and the report path is at fault; sums that
+never move mean the IC is not scanning. The display log line
+`SWEET FB: display off/on swaps N presents M` plus the vsync `skip
+mask/id/nosurf/self/bounds` counters separate "swaps stopped" from "presents
+skipped".
+
+**WiFi / other hardware (assessed, not attempted).** Toco WiFi is the Qualcomm
+WCN3990 combo behind icnss: `qcom,icnss@18800000` (0x800000 regs, SMMU iova at
+0xa0000000, 12 IRQs 0x19e-0x1a9, wlan-msa fixed region, supplies vdd-cx-mx,
+1.8-xo, 1.3-rfa, 3.3-ch0) with IPA at 0x1e00000 (GSI) in the data path; BT is
+`qca,wcn3990` on the QUP UART at 0x88c000. A port needs the WCSS PIL firmware
+load, SMEM/SMP2P, QMI+WMI and an IPA/GSI data path - weeks of driver work, none
+of it testable without the phone. Nothing was stubbed; a dead stub would only
+add code to the kernel. The realistic network path stays USB: 0072-0081 give a
+CDC-ECM gadget and ifnet `ue0`, and what is missing is IOKit
+IONetworkInterface/IONetworkController objects so configd enumerates the
+service (same gap as on sweet). Audio (tavil/wcd934x over SLIMbus) and sensors
+(SSC) are DSP firmware bound like WiFi.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
