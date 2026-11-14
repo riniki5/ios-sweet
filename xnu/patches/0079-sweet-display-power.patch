@@ -22,24 +22,28 @@
  	kSweetFBIsMainDisplay           = 18,
  	kSweetFBGetDotPitch             = 28,
  	kSweetFBNotifications           = 72,
-@@ -108,6 +114,8 @@
+@@ -110,6 +116,11 @@
  	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
  	bool          fDirty;
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
 +	bool          fPowerOff;      /* RequestPowerChange(0) */
 +	uint32_t      fFadeStep;      /* fade-out steps done while off */
++	/* Why a present drew nothing: mask, zero id, missing surface, the panel
++	 * surface itself, or a surface that fails the bounds checks. */
++	uint64_t      fSkip[5];
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -216,6 +224,30 @@
+@@ -218,6 +229,31 @@
  		    (IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
  		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
  	}
 +	if ((count % 300u) == 0) {
 +		/* Five seconds at 60 Hz: is the timer running and are frames arriving? */
-+		IOLog("SWEET FB: vsync %llu swaps %llu presents %llu dirty %d off %d ticks %u\n",
++		IOLog("SWEET FB: vsync %llu swaps %llu presents %llu dirty %d off %d ticks %u skip mask/id/nosurf/self/bounds %llu/%llu/%llu/%llu/%llu\n",
 +		    count, fb->fSwapCount, fb->fPresentCount, fb->fDirty, fb->fPowerOff,
-+		    fb->fFlushTicks);
++		    fb->fFlushTicks, fb->fSkip[0], fb->fSkip[1], fb->fSkip[2],
++		    fb->fSkip[3], fb->fSkip[4]);
 +	}
 +	if (fb->fPowerOff) {
 +		/* Fade out: halve every channel each vsync, then black, then idle. */
@@ -62,21 +66,59 @@
  	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
  	uint8_t *rec = NULL;
  	if (flush) {
-@@ -506,6 +538,19 @@
+@@ -311,6 +347,7 @@
+ 		int32_t w = (int32_t)get32(b, 8), h = (int32_t)get32(b, 12);
+ 
+ 		if (!(mask & (1u << layer)) || id == 0) {
++			fSkip[(mask & (1u << layer)) ? 1 : 0]++;
+ 			continue;
+ 		}
+ 		SweetSurface *s = sweet_surface_copy(id);
+@@ -322,6 +359,7 @@
+ 			    get32(a, 12), dx, dy, w, h);
+ 		}
+ 		if (s == NULL || s == fSurface) {
++			fSkip[s == NULL ? 2 : 3]++;
+ 			OSSafeReleaseNULL(s);
+ 			continue;
+ 		}
+@@ -367,6 +405,7 @@
+ 		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
+ 		    s->memory == NULL || last > s->memory->getLength()) {
+ 			src = 0;
++			fSkip[4]++;
+ 		}
+ 		if (src != 0 && bpe == 4) {
+ 			for (int32_t y = 0; y < h; y++) {
+@@ -510,6 +549,33 @@
  			    args->scalarInput[0] ? "on" : "off");
  		}
  		break;
 +	case kSweetFBRequestPowerChange:
 +		if (args->scalarInputCount >= 1) {
 +			bool off = args->scalarInput[0] == 0;
++			uint8_t *rec = NULL;
 +			IOLockLock(fFB->fLock);
 +			if (off != fFB->fPowerOff) {
 +				fFB->fPowerOff = off;
 +				fFB->fFadeStep = 0;
 +				fFB->fDirty = true;     /* on: redraw the latest frame */
++				if (!off) {
++					rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
++					if (rec != NULL) {
++						memcpy(rec, fFB->fPending, SWEET_FB_SWAP_REC_SIZE);
++						fFB->fDirty = false;
++					}
++				}
 +			}
++			uint64_t swaps = fFB->fSwapCount, presents = fFB->fPresentCount;
 +			IOLockUnlock(fFB->fLock);
-+			IOLog("SWEET FB: display %s\n", off ? "off" : "on");
++			if (rec != NULL) {
++				fFB->present(rec);      /* wake: show the last frame at once */
++				IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++			}
++			IOLog("SWEET FB: display %s swaps %llu presents %llu\n",
++			    off ? "off" : "on", swaps, presents);
 +		}
 +		break;
  	case kSweetFBSwapWait:
