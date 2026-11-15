@@ -1,43 +1,35 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Toco port handoff (2026-11-14, latest)
+## Toco port handoff (2026-11-15, latest)
 
 Toco = Xiaomi Mi Note 10 Lite (SM7150G, 1080x2340). Same XNU/shim as sweet, fork
-`riniki5/ios-sweet`, branch `toco`; 0082-toco-mi-note-10-lite.patch carries the
-panel size, RPMh touch rail, Focaltech/Goodix FTI driver and HID panel size.
+`riniki5/ios-sweet`, branch `main`; 0082-toco-mi-note-10-lite.patch carries the
+panel size, RPMh touch rail, the Focaltech FTI/FTM5 driver (`sweet_touch.c`) and
+the HID panel size. User-facing guide: `docs/TOCO.md`; `tools/toco-shim.sh`
+packages a kernel into a toco shim-boot.img.
 
-**State.** SpringBoard runs (last built kernel 26afe33, CI run 43528432343).
-Display renders but shows a single frame after display off/on. Touch is dead:
-the FTI IC answers at 0x49 (dchip id 0x3639, fw 0x8100, sysinfo sig a5, cfg/cx/
-panel afe 03/03/03), reset and FTI reads work, the FW echoes our commands
-(`43 01 a0 00 01` = echo of scan-on {A0 00 01}) and loads sync frames (header
-a5 30), but the FIFO never delivers ENTER/MOTION/LEAVE (all zero for a whole
-boot with fingers on the panel). Force-cal status events (`43 05`) appear after
-each probe.
+**State: touch works (verified 2026-11-15, log15).** Root cause of the dead AFE
+was a unit regression in 0082: the RPMh VRM voltage data word is millivolts
+(Linux writes `DIV_ROUND_UP(uV, 1000)`), 0082 wrote 3000000. The RPM accepted it
+(cmd-status 0x10101) and PM6150L L6 stayed at 1.648 V - the digital core ran on
+VDDIO (GPIO72) while the analog front end had no supply, so every node read the
+same 0xD374 and the IC reported `43 05 01` mutual negative detect. d608235
+restores mV semantics (ldoc6 3000, ldoc11 3200; ranges 1648..3100 / 2950..3400).
+Log15 then shows `SWEET RPMH: TCS0 ACTIVE 3000 mV mode=7 enable=1`, raw sums that
+move with a finger, `13/23/33` events and rising enter/motion/leave counters.
+The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
+all along.
 
-**Unbuilt on purpose until CI returns.** e1bed3d mirrors the vendor raw-capture
-sequence (scan+s settle, stop, flush, request; locked scan; no-cal scan; panel
-init + reset) and fingerprints the raw buffer at the address sysinfo names
-instead of fbuf+4 (fbuf+4 was static across reprobes, so it is not the live
-frame). 1065de6 adds present-skip counters and repaints the last frame on
-power-on.
+**Kernel under test: c028073 (CI run 43705708600).** Strips the AFE probes
+(watch sums, panel-init experiment, 12 s raw capture all removed; ident/IER/
+sysinfo/crc prints and sense+gesture init stay, poll print every 1000 polls) and
+boots with `cpus=8` + `sweetfb_hz=60` (patch 0078 already raises the SMP cap to
+8). Next: rebuild the shim, `fastboot boot` only, pull the log and compare
+`SWEET FB` swaps/presents and the `SWEET TOUCH` poll counters against log15.
 
-**Blocker: GitHub Actions is disabled for `riniki5/ios-sweet`** ("Actions has
-been disabled for this repository", HTTP 422 for workflow_dispatch on both main
-and toco; a real push to `xnu/patches/**` produced no run; repo is not archived
-and `actions/permissions` says enabled/all). Only the repository owner can
-restore it (Settings -> Actions, or GitHub support). Everything committed after
-26afe33 is unbuilt; XNU cannot be built locally (work-toco/bt is a CI buildtree
-for `clang -fsyntax-only` only, see work-toco/cc-check.sh).
-
-**Next run.** Build e1bed3d + 1065de6, rebuild the shim, `fastboot boot` only,
-touch the panel, pull the console. Read `fti cap/capraw/lock0/lock1/nocal/
-pinit` fingerprint sums and `fti live` (every 3 s, real raw address): sums that
-move with a finger mean the AFE scans and the report path is at fault; sums that
-never move mean the IC is not scanning. The display log line
-`SWEET FB: display off/on swaps N presents M` plus the vsync `skip
-mask/id/nosurf/self/bounds` counters separate "swaps stopped" from "presents
-skipped".
+**Still open: single frame after display off/on** (0079/1065de6). The panel is
+never powered down; the fade is software-only, so the missing repaint is above
+the copy path.
 
 **WiFi / other hardware (assessed, not attempted).** Toco WiFi is the Qualcomm
 WCN3990 combo behind icnss: `qcom,icnss@18800000` (0x800000 regs, SMMU iova at

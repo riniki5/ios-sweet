@@ -8,6 +8,10 @@ As of **2026-10-18** the phone boots to the **iOS home screen**. You can unlock 
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
+## Also on the Xiaomi Mi Note 10 Lite (`toco`)
+
+This fork carries a port to the **Mi Note 10 Lite** (`toco`, SM7150G / Snapdragon 730G, 1080×2340) alongside `sweet`. Patch 0082 adds the Focaltech FTM5 touch controller, its PM6150L LDO6 rail vote and the 2340-pixel panel geometry; the same kernel, shim and iOS root boot both phones. The build steps differ only in `SWEET_DEVICE=toco` and the boot-args. See **[docs/TOCO.md](docs/TOCO.md)** for the hardware differences, the flashing guide and the touch troubleshooting notes.
+
 ## What works
 
 | Area | State |
@@ -159,6 +163,7 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `tools/qemu-sweet.py` | QEMU test boots with framebuffer text decoding |
 | `tools/adt.py`, `remotezip.py`, `unpack_bootv2.py`, `sparsediff.py` | Helpers |
 | `NOTES.md` | Detailed engineering log: every boot, crash and decision, plus hardware facts |
+| `docs/TOCO.md` | Xiaomi Mi Note 10 Lite (`toco`) port: differences, build, flash, troubleshooting |
 
 Not in git: partition backups, live device trees, recovery images, Apple firmware and root images, and downloaded or generated build trees. They contain device serials and calibration data, or Apple's copyrighted files.
 
@@ -186,6 +191,8 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0066–0067 | Fault-region crash info; console mute |
 | 0068 | IOSurface lookup semantics for already-mapped surfaces |
 | 0069 | Batched persistent-log flushes |
+| 0070–0081 | PID hibernate, touch edges, USB device mode and Ethernet, 8-core SMP, display power, network traces |
+| 0082 | Xiaomi Mi Note 10 Lite (`toco`): Focaltech touch, PM6150L LDO6 vote in millivolts, 1080×2340 panel |
 
 ## Key hardware facts
 
