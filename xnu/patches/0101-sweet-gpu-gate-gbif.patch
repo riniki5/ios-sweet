@@ -1,0 +1,82 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -34,6 +34,14 @@
+  * splits the release with markers: a delay, an RBBM read and then the GMU
+  * read, so the next log says whether the CM3 itself or our first register
+  * access after release is what stalls the bus.
++ * log38 and log39 came back byte-identical to log37 - not even the 1 s flush
++ * cadence wrote anything - so the 0100 kernel stopped before the release, at
++ * the new A6XX_GBIF_HALT access. GBIF is the GPU's bus interface in the CX
++ * power domain, and this probe never actually brings CX up (the GDSC is only
++ * read, the CX rail votes time out), so touching it can hang the whole
++ * interconnect. 0101 keeps that access and the gmu_clk_src write behind
++ * gpu_gbif=1 / gpu_gmuclk=1, and gives every post-release GMU read its own
++ * print, so the next log names the register that stalls instead of the phase.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -1593,22 +1601,34 @@
+  * configured; without a registered source the CM3 only has whatever the
+  * bootloader left. TCXO (19.2 MHz) is slow but is the one parent that needs
+  * no other block to be running.
++ * Both are opt-in (gpu_gbif=1, gpu_gmuclk=1) because 0100's unconditional GBIF
++ * read killed the kernel before it could log again, and the GPUCC read stays
++ * free: this block is already read all over gpu_gmu_report().
+  */
+ static void
+ gpu_gmu_prestart(void)
+ {
+-	uint32_t halt = gpu_rd(gpu_core, GBIF_HALT);
++	int gbif = 0, clk = 0;
+ 
+-	printf("SWEET GPU: prestart gbif halt=%#x ack=%#x gmu_clk_src=%#x/%#x\n",
+-	    halt, gpu_rd(gpu_core, GBIF_HALT_ACK), gpu_rd(gpu_cc, GPUCC_GMU_RCG),
++	PE_parse_boot_argn("gpu_gbif", &gbif, sizeof(gbif));
++	PE_parse_boot_argn("gpu_gmuclk", &clk, sizeof(clk));
++	printf("SWEET GPU: prestart gbif=%d gmu_clk_src=%#x/%#x\n",
++	    gbif, gpu_rd(gpu_cc, GPUCC_GMU_RCG),
+ 	    gpu_rd(gpu_cc, GPUCC_GMU_RCG_CFG));
+-	if (halt != 0) {
+-		gpu_wr(gpu_core, GBIF_HALT, 0);
+-		delay(1);
+-		printf("SWEET GPU: gbif halt now %#x ack=%#x\n",
+-		    gpu_rd(gpu_core, GBIF_HALT), gpu_rd(gpu_core, GBIF_HALT_ACK));
++	if (gbif) {
++		uint32_t halt = gpu_rd(gpu_core, GBIF_HALT);
++
++		printf("SWEET GPU: gbif halt=%#x ack=%#x\n",
++		    halt, gpu_rd(gpu_core, GBIF_HALT_ACK));
++		if (halt != 0) {
++			gpu_wr(gpu_core, GBIF_HALT, 0);
++			delay(1);
++			printf("SWEET GPU: gbif halt now %#x ack=%#x\n",
++			    gpu_rd(gpu_core, GBIF_HALT),
++			    gpu_rd(gpu_core, GBIF_HALT_ACK));
++		}
+ 	}
+-	if (gpu_rd(gpu_cc, GPUCC_GMU_RCG) & RCG_ROOT_OFF) {
++	if (clk && (gpu_rd(gpu_cc, GPUCC_GMU_RCG) & RCG_ROOT_OFF)) {
+ 		gpu_wr(gpu_cc, GPUCC_GMU_RCG_CFG, RCG_CFG_XO);
+ 		gpu_wr(gpu_cc, GPUCC_GMU_RCG, RCG_UPDATE);
+ 		delay(1);
+@@ -1667,11 +1687,16 @@
+ 	delay(20);
+ 	printf("SWEET GPU: cm3 released 20 ms ago, no gmu read yet\n");
+ 	printf("SWEET GPU: post-release rbbm=%#x\n", gpu_core_rev());
+-	printf("SWEET GPU: post-release gmu fw-init=%#x busy=%#x reset=%#x\n",
+-	    gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT),
+-	    gpu_rd(gpu_gmu, GMU_CM3_FW_BUSY),
++	/* One print per access: whichever line is last names the stuck one. */
++	printf("SWEET GPU: post-release reading fw-init\n");
++	uint32_t init = gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT);
++	printf("SWEET GPU: post-release fw-init=%#x\n", init);
++	printf("SWEET GPU: post-release reading busy\n");
++	printf("SWEET GPU: post-release busy=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_CM3_FW_BUSY));
++	printf("SWEET GPU: post-release reading reset\n");
++	printf("SWEET GPU: post-release reset=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
+-	uint32_t init = 0;
+ 	unsigned i;
+ 	for (i = 0; i < 100; ++i) {
+ 		init = gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT);
