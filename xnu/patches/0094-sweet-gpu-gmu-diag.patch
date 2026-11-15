@@ -42,16 +42,18 @@
  /* Fabia alpha PLL (clk-alpha-pll.c: FABIA_* offsets). */
  #define PLL_MODE                0x0u
  #define PLL_L_VAL               0x4u
-@@ -96,7 +117,7 @@
+@@ -96,8 +117,9 @@
  #define RCG_CFG_CRC_DIV  (RCG_CFG_SRC(1) | RCG_CFG_DIV(1)) /* gpu_cc_parent_map_2 */
  #define RCG_CFG_GPLL0    (RCG_CFG_SRC(5) | RCG_CFG_DIV(1)) /* src 5 = GPLL0_MAIN */
  
 -static vm_offset_t gpu_cc, gpu_gcc, gpu_core;
 +static vm_offset_t gpu_cc, gpu_gcc, gpu_core, gpu_gmu;
  static bool gpu_dead;
++static bool gpu_gmu_live;
  
  static uint32_t
-@@ -107,6 +128,14 @@
+ gpu_rd(vm_offset_t base, uint32_t off)
+@@ -107,6 +129,14 @@
  	return v;
  }
  
@@ -66,7 +68,7 @@
  static void
  gpu_wr(vm_offset_t base, uint32_t off, uint32_t value)
  {
-@@ -193,6 +222,38 @@
+@@ -193,6 +223,38 @@
  }
  
  /*
@@ -79,7 +81,7 @@
 +static void
 +gpu_gmu_report(const char *when)
 +{
-+	if (!gpu_gmu) {
++	if (!gpu_gmu || !gpu_gmu_live) {
 +		return;
 +	}
 +	uint32_t sp = gpu_rd(gpu_gmu, GMU_SPTPRAC_PWR_STATUS);
@@ -105,7 +107,7 @@
   * Start a Fabia PLL the way clk_fabia_pll_configure()/enable() do it: fresh
   * config registers (the dumped 0x20485699/0x2067 set matches gpu_cc_pll0),
   * L and fractional part, then reset, OPMODE RUN, lock on PLL_MODE bit31 (the
-@@ -285,6 +346,42 @@
+@@ -285,6 +347,42 @@
  	return rooted;
  }
  
@@ -148,7 +150,7 @@
  static uint32_t
  gpu_core_rev(void)
  {
-@@ -341,10 +438,14 @@
+@@ -341,10 +439,14 @@
  	gpu_gcc = ml_io_map(GCC_PA, 0x100000);
  	gpu_cc = ml_io_map(GPUCC_PA, 0x9000);
  	gpu_core = ml_io_map(GPU_PA, 0x40000);
@@ -163,7 +165,22 @@
  	uint32_t ahb = gpu_rd(gpu_gcc, GCC_GPU_CFG_AHB_CBCR);
  	uint32_t gpll = gpu_rd(gpu_gcc, GCC_GPU_GPLL0_CTL);
  	printf("SWEET GPU: gcc gpu-cfg-ahb=%#x memnoc=%#x snoc-dvm=%#x gpu-gpll0-ctl=%#x\n",
-@@ -395,6 +496,7 @@
+@@ -391,10 +493,22 @@
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_SNOC_DVM_CBCR, "gpu_cc_cx_snoc_dvm_clk");
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_CXO_CBCR, "gpu_cc_cxo_clk");
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_GFX3D_CBCR, "gpu_cc_cx_gfx3d_clk");
++	if (cxe) {
++		/*
++		 * gpu_cc_cx_gmu_clk is the GMU block's own clock; the vendor
++		 * probe only fixes up its WAKEUP/SLEEP fields, which stock reads
++		 * back as 0x80004ff0, so the enable bit is all that is ours.
++		 * It has to be on before the GMU aperture is read below.
++		 */
++		if (gpu_clock_on(gpu_cc, GPUCC_CX_GMU_CBCR, "gpu_cc_cx_gmu_clk")) {
++			gpu_gmu_live = true;
++		}
++	}
+ 	/* Read-only: what the ARC resources map to before any rail vote. */
  	sweet_rpmh_arc_probe("cx.lvl");
  	sweet_rpmh_arc_probe("mx.lvl");
  	sweet_rpmh_arc_probe("gfx.lvl");
@@ -171,20 +188,23 @@
  	if (!gx) {
  		printf("SWEET GPU: CX on; pass gpu_gx=1 to power GX and read the chip id\n");
  		return;
-@@ -434,10 +536,10 @@
- 		/*
- 		 * Recommended WAKEUP/SLEEP nibbles for gpu_cc_cx_gmu_clk, done by
- 		 * gpucc-sdmmagpie's probe(); the GMU itself stays unstarted.
-+		 * Those fields are hardware configuration (stock reads back
-+		 * 0x80004ff0), so only the enable bit is ours to touch.
- 		 */
- 		gpu_clock_on(gpu_cc, GPUCC_CX_GMU_CBCR, "gpu_cc_cx_gmu_clk");
+@@ -430,15 +544,6 @@
+ 	if (rcg_keep == ~0u) {
+ 		printf("SWEET GPU: no gfx3d source roots the RCG\n");
+ 	}
+-	if (cxe) {
+-		/*
+-		 * Recommended WAKEUP/SLEEP nibbles for gpu_cc_cx_gmu_clk, done by
+-		 * gpucc-sdmmagpie's probe(); the GMU itself stays unstarted.
+-		 */
+-		gpu_clock_on(gpu_cc, GPUCC_CX_GMU_CBCR, "gpu_cc_cx_gmu_clk");
 -		uint32_t gmu = gpu_rd(gpu_cc, GPUCC_CX_GMU_CBCR);
 -		gpu_wr(gpu_cc, GPUCC_CX_GMU_CBCR, (gmu & ~0xfff0u) | 0x0ff0u);
- 	}
+-	}
  
  	/*
-@@ -482,33 +584,37 @@
+ 	 * ABL leaves gfx.lvl at retention, which does not close the GX switch;
+@@ -482,33 +587,37 @@
  		return;
  	}
  	/*
@@ -242,13 +262,13 @@
  	}
  	printf("SWEET GPU: RBBM_REVISION_ID=%#x (expect 0x6010800)\n", rev);
  	if (rev != 0 && rev != 0xffffffffu) {
-@@ -528,5 +634,12 @@
+@@ -528,5 +637,12 @@
  	 */
  	gpu_dump_at(gpu_cc, "gpucc", 0x1000, 48);
  	gpu_dump_at(gpu_cc, "gxdom", 0x1500, 8);
 +	/* What the CX side thinks of GX after the whole ladder ran. */
 +	gpu_gmu_report("post-rcg");
-+	if (gpu_gmu) {
++	if (gpu_gmu_live) {
 +		gpu_dump_at(gpu_gmu, "gmublk", 0x1f800, 8);
 +		gpu_dump_at(gpu_gmu, "gmublk", 0x1f8c0, 12);
 +		gpu_dump_at(gpu_gmu, "gmublk", 0x1f980, 8);
