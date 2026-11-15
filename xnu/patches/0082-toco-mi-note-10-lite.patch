@@ -10,7 +10,7 @@ index 4da50d8..5dc56fc 100644
   * Sole XNU apps-DRV owner, called from thread context with deep idle disabled.
   * No sleep/wake programming, SPMI writes, GIC handler, or timeout recovery.
   */
-@@ -234,7 +235,7 @@ rh_send(uint32_t address, unsigned mv)
+@@ -234,7 +235,7 @@
  		for (unsigned c = 0; c < rh_ncpt; ++c) {
  			if ((enabled & (1u << c)) &&
  			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
@@ -19,7 +19,7 @@ index 4da50d8..5dc56fc 100644
  				return EBUSY;
  			}
  		}
-@@ -320,16 +321,28 @@ rh_send(uint32_t address, unsigned mv)
+@@ -320,16 +321,29 @@
  		return EIO;
  	}
  	rh_poisoned = false;
@@ -37,18 +37,19 @@ index 4da50d8..5dc56fc 100644
 +	/*
 +	 * Board-specific helper: do not apply PMIC5-LDO policy to arbitrary
 +	 * resources. DT ranges are ldoc11 2.95..3.4 V and ldoc6 1.648..3.1 V;
-+	 * RPMh VRM data words are microvolts (Linux writes uV), so call with uV.
++	 * the VRM voltage data word is millivolts (Linux writes DIV_ROUND_UP(uV,
++	 * 1000)), so call with mV.
 +	 */
 +	unsigned lo = 0, hi = 0;
 +	if (res && !strcmp(res, "ldoc11")) {
-+		lo = 2950000;
-+		hi = 3400000;
++		lo = 2950;
++		hi = 3400;
 +	} else if (res && !strcmp(res, "ldoc6")) {
-+		lo = 1648000;
-+		hi = 3100000;
++		lo = 1648;
++		hi = 3100;
 +	}
 +	if (!hi || mv < lo || mv > hi) {
-+		printf("SWEET RPMH: expected ldoc11 2950000..3400000 uV or ldoc6 1648000..3100000 uV\n");
++		printf("SWEET RPMH: expected ldoc11 2950..3400 mV or ldoc6 1648..3100 mV\n");
  		return EINVAL;
  	}
  	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
@@ -1009,7 +1010,7 @@ index 03defe6..0185d4f 100644
  touch_thread(void *arg, wait_result_t result)
  {
  	unsigned delay_s = 45;
-@@ -569,18 +1400,34 @@
+@@ -569,18 +1400,32 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -1029,14 +1030,12 @@ index 03defe6..0185d4f 100644
 -	if (power_error) {
 +	/*
 +	 * sweet (GT9896): L11C 3.2 V, GPIO90 digital enable. toco (FTS):
-+	 * PM6150L L6, VDDIO on GPIO72. The DT init voltage for L6 is 1.648 V
-+	 * (its minimum), but the vendor driver never votes a voltage: it only
-+	 * enables the rail and inherits the 3.0 V state recovery reports for
-+	 * the working IC. Voting 1.648 V leaves the digital core alive (I2C
-+	 * and FW both answer) while the analog front end stays dead.
++	 * PM6150L L6, VDDIO on GPIO72. Recovery reports L6 at 3.0 V for the
++	 * working IC; 1.648 V (the DTS init value) boots only the digital
++	 * core. RPMh VRM voltage data is in millivolts.
 +	 */
-+	int power_error = toco ? sweet_rpmh_vreg_enable("ldoc6", 3000000) :
-+	    sweet_rpmh_vreg_enable("ldoc11", 3200000);
++	int power_error = toco ? sweet_rpmh_vreg_enable("ldoc6", 3000) :
++	    sweet_rpmh_vreg_enable("ldoc11", 3200);
 +	if (power_error && !toco) {
  		printf("SWEET TOUCH: L11C RPMh enable failed %d; probes skipped\n", power_error);
  		goto out;
@@ -1049,7 +1048,7 @@ index 03defe6..0185d4f 100644
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -589,39 +1436,112 @@
+@@ -589,39 +1434,112 @@
  	touch_wait(2);
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
