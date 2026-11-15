@@ -7,9 +7,9 @@
 - *   6  SwapWait, 7 GetID, 8 GetDisplaySize -> [w, h], 18 IsMainDisplay,
 + *   6  SwapWait, 7 GetID, 8 GetDisplaySize -> [w, h],
 + *   12 RequestPowerChange [state]: 0 = display off (backboardd, power
-+ *      button / auto-lock), else on. Off fades the panel out over a few
-+ *      vsyncs (halving each pixel) and keeps it black until on again;
-+ *      the panel itself stays powered (AMOLED black pixels are off).
++ *      button / auto-lock), else on. Off blanks the panel in one pass and
++ *      keeps it black until on again; the panel itself stays powered
++ *      (AMOLED black pixels are off).
 + *   18 IsMainDisplay,
   *   28 GetDotPitch, 72 Enable/DisableNotifications [func, refcon, type, 0]
   * Everything else is accepted and logged once.
@@ -27,14 +27,14 @@
  	bool          fDirty;
  	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
 +	bool          fPowerOff;      /* RequestPowerChange(0) */
-+	uint32_t      fFadeStep;      /* fade-out steps done while off */
++	bool          fBlanked;       /* panel cleared while off */
 +	/* Why a present drew nothing: mask, zero id, missing surface, the panel
 +	 * surface itself, or a surface that fails the bounds checks. */
 +	uint64_t      fSkip[5];
  
  	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
  	void addClient(IOMobileFramebufferUserClient *client);
-@@ -218,6 +229,31 @@
+@@ -218,6 +229,26 @@
  		    (IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
  		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
  	}
@@ -46,19 +46,14 @@
 +		    fb->fSkip[3], fb->fSkip[4]);
 +	}
 +	if (fb->fPowerOff) {
-+		/* Fade out: halve every channel each vsync, then black, then idle. */
-+		uint32_t step = fb->fFadeStep;
-+		if (step <= 6) {
-+			fb->fFadeStep = step + 1;
-+		}
++		/* The panel scans out of fPixels while we write, so a multi-step
++		 * fade shows as the write front crossing the screen. Blank it in
++		 * one pass instead. */
++		bool blank = !fb->fBlanked;
++		fb->fBlanked = true;
 +		IOLockUnlock(fb->fLock);
-+		if (step <= 6) {
-+			for (uint32_t y = 0; y < fb->fHeight; y++) {
-+				volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
-+				for (uint32_t x = 0; x < fb->fWidth; x++) {
-+					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
-+				}
-+			}
++		if (blank) {
++			bzero(fb->fPixels, (size_t)fb->fRowBytes * fb->fHeight);
 +		}
 +		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
 +		return;
@@ -66,7 +61,7 @@
  	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
  	uint8_t *rec = NULL;
  	if (flush) {
-@@ -311,6 +347,7 @@
+@@ -311,6 +342,7 @@
  		int32_t w = (int32_t)get32(b, 8), h = (int32_t)get32(b, 12);
  
  		if (!(mask & (1u << layer)) || id == 0) {
@@ -74,7 +69,7 @@
  			continue;
  		}
  		SweetSurface *s = sweet_surface_copy(id);
-@@ -322,6 +359,7 @@
+@@ -322,6 +354,7 @@
  			    get32(a, 12), dx, dy, w, h);
  		}
  		if (s == NULL || s == fSurface) {
@@ -82,7 +77,7 @@
  			OSSafeReleaseNULL(s);
  			continue;
  		}
-@@ -367,6 +405,7 @@
+@@ -367,6 +400,7 @@
  		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
  		    s->memory == NULL || last > s->memory->getLength()) {
  			src = 0;
@@ -90,7 +85,7 @@
  		}
  		if (src != 0 && bpe == 4) {
  			for (int32_t y = 0; y < h; y++) {
-@@ -510,6 +549,33 @@
+@@ -510,6 +544,33 @@
  			    args->scalarInput[0] ? "on" : "off");
  		}
  		break;
@@ -101,7 +96,7 @@
 +			IOLockLock(fFB->fLock);
 +			if (off != fFB->fPowerOff) {
 +				fFB->fPowerOff = off;
-+				fFB->fFadeStep = 0;
++				fFB->fBlanked = false;
 +				fFB->fDirty = true;     /* on: redraw the latest frame */
 +				if (!off) {
 +					rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
