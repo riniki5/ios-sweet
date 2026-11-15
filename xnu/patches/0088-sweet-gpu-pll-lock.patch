@@ -1,0 +1,182 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -45,6 +45,7 @@
+ #define GPUCC_CX_CXO_CBCR       0x109cu
+ #define GPUCC_CX_GFX3D_CBCR     0x10a4u
+ #define GPUCC_CX_GFX3D_SLV_CBCR 0x10a8u
++#define GPUCC_CX_GMU_CBCR       0x1098u
+ #define GPUCC_GX_DOMAIN         0x1508u
+ #define GPUCC_CX_GDSCR_STATUS   0x1540u
+ #define GPUCC_PLL0              0x0u
+@@ -64,8 +65,11 @@
+ #define PLL_FABIA_FRAC_VAL      0x38u
+ #define PLL_MODE_OUTCTRL        (1u << 0)
+ #define PLL_MODE_RESET_N        (1u << 2)
++#define PLL_MODE_UPDATE         (1u << 22)
+ #define PLL_MODE_HW_UPDATE_BYPASS (1u << 23)
+-#define PLL_STATUS_LOCK         (1u << 31)
++#define PLL_MODE_ACK_LATCH      (1u << 29)
++#define PLL_MODE_LOCK_DET       (1u << 31)   /* wait_for_pll() reads PLL_MODE */
++#define PLL_STATUS_LOCK         (1u << 31)   /* informational only */
+ #define PLL_USER_OUT_MASK       0x7u
+ 
+ #define CBCR_ENABLE     (1u << 0)
+@@ -81,8 +85,9 @@
+ #define RCG_ROOT_EN     (1u << 1)
+ #define RCG_ROOT_OFF    (1u << 31)
+ #define RCG_CFG_SRC(sel) ((uint32_t)(sel) << 8)  /* SRC_SEL is bits 8-10 */
+-#define RCG_CFG_XO      RCG_CFG_SRC(0)
+-#define RCG_CFG_CRC_DIV RCG_CFG_SRC(1)   /* gpu_cc_pll0_out_even (gpu_cc_parent_map_2) */
++#define RCG_CFG_DIV(d)   ((uint32_t)(d) & 0x1fu) /* pre_div from the freq table */
++#define RCG_CFG_XO       (RCG_CFG_SRC(0) | RCG_CFG_DIV(1))
++#define RCG_CFG_CRC_DIV  (RCG_CFG_SRC(1) | RCG_CFG_DIV(1)) /* gpu_cc_parent_map_2 */
+ 
+ static vm_offset_t gpu_cc, gpu_gcc, gpu_core;
+ static bool gpu_dead;
+@@ -132,7 +137,7 @@
+ 		}
+ 		delay(1);
+ 	}
+-	printf("SWEET GPU: %s did not halt, now %#x\n", name, gpu_rd(base, off));
++	printf("SWEET GPU: %s still off, now %#x\n", name, gpu_rd(base, off));
+ 	return false;
+ }
+ 
+@@ -173,11 +178,15 @@
+ /*
+  * Start a Fabia PLL the way clk_fabia_pll_configure()/enable() do it: fresh
+  * config registers (the dumped 0x20485699/0x2067 set matches gpu_cc_pll0),
+- * L and fractional part, then reset, OPMODE RUN, lock, output enable.
++ * L and fractional part, then reset, OPMODE RUN, lock on PLL_MODE bit31 (the
++ * vendor wait_for_pll() reads PLL_MODE, not PLL_STATUS), then the output.
++ * A PLL the bootloader left locked only needs the new L/frac latched.
+  */
+ static bool
+ gpu_pll_start(vm_offset_t base, uint32_t off, uint32_t l, uint32_t frac, const char *name)
+ {
++	bool running = (gpu_rd(base, off + PLL_MODE) & PLL_MODE_LOCK_DET) != 0;
++
+ 	gpu_wr(base, off + PLL_FABIA_CAL_L_VAL, 0x3fu);
+ 	gpu_wr(base, off + PLL_L_VAL, l);
+ 	gpu_wr(base, off + PLL_FABIA_FRAC_VAL, frac);
+@@ -189,55 +198,74 @@
+ 	gpu_wr(base, off + PLL_TEST_CTL_HI, 0x40000000u);
+ 
+ 	uint32_t mode = gpu_rd(base, off + PLL_MODE);
+-	mode |= PLL_MODE_HW_UPDATE_BYPASS;
+-	gpu_wr(base, off + PLL_MODE, mode & ~PLL_MODE_OUTCTRL);
+-	gpu_wr(base, off + PLL_OPMODE, 0);
+-	gpu_wr(base, off + PLL_MODE, mode | PLL_MODE_RESET_N);
+-	gpu_wr(base, off + PLL_OPMODE, 1);
++	gpu_wr(base, off + PLL_MODE,
++	    (mode & ~PLL_MODE_OUTCTRL) | PLL_MODE_HW_UPDATE_BYPASS);
++	if (running) {
++		/* Already locked: clk_fabia_pll_latch_input() to take the new rate. */
++		gpu_wr(base, off + PLL_MODE, gpu_rd(base, off + PLL_MODE) | PLL_MODE_UPDATE);
++		delay(1);
++		if (!(gpu_rd(base, off + PLL_MODE) & PLL_MODE_ACK_LATCH)) {
++			printf("SWEET GPU: %s latch did not ack\n", name);
++		}
++		gpu_wr(base, off + PLL_MODE, gpu_rd(base, off + PLL_MODE) & ~PLL_MODE_UPDATE);
++		delay(1);
++	} else {
++		gpu_wr(base, off + PLL_OPMODE, 0);
++		gpu_wr(base, off + PLL_MODE, gpu_rd(base, off + PLL_MODE) & ~PLL_MODE_RESET_N);
++		delay(1);
++		gpu_wr(base, off + PLL_MODE, gpu_rd(base, off + PLL_MODE) | PLL_MODE_RESET_N);
++		delay(1);
++		gpu_wr(base, off + PLL_OPMODE, 1);
++	}
+ 
+ 	bool locked = false;
+ 	for (unsigned i = 0; i < 1000; ++i) {
+-		if (gpu_rd(base, off + PLL_STATUS) & PLL_STATUS_LOCK) {
++		if (gpu_rd(base, off + PLL_MODE) & PLL_MODE_LOCK_DET) {
+ 			locked = true;
+ 			break;
+ 		}
+ 		delay(1);
+ 	}
+ 	if (!locked) {
+-		printf("SWEET GPU: %s did not lock, status %#x mode=%#x\n", name,
+-		    gpu_rd(base, off + PLL_STATUS), gpu_rd(base, off + PLL_MODE));
++		printf("SWEET GPU: %s did not lock, mode=%#x status=%#x\n", name,
++		    gpu_rd(base, off + PLL_MODE), gpu_rd(base, off + PLL_STATUS));
+ 		return false;
+ 	}
+ 	gpu_wr(base, off + PLL_USER_CTL_LO,
+ 	    gpu_rd(base, off + PLL_USER_CTL_LO) | PLL_USER_OUT_MASK);
+ 	gpu_wr(base, off + PLL_MODE, gpu_rd(base, off + PLL_MODE) | PLL_MODE_OUTCTRL);
+-	printf("SWEET GPU: %s locked L=%#x frac=%#x out=%#x\n", name,
++	printf("SWEET GPU: %s %s, L=%#x frac=%#x mode=%#x status=%#x\n", name,
++	    running ? "was running, latched" : "locked",
+ 	    gpu_rd(base, off + PLL_L_VAL), gpu_rd(base, off + PLL_FABIA_FRAC_VAL),
+-	    gpu_rd(base, off + PLL_MODE));
++	    gpu_rd(base, off + PLL_MODE), gpu_rd(base, off + PLL_STATUS));
+ 	return true;
+ }
+ 
+-/* Point an RCG at a new parent and wait for its root clock to leave CLK_OFF. */
++/* Point an RCG at a new parent, then force its root on (FORCE_ENABLE_RCG). */
+ static bool
+ gpu_rcg_switch(vm_offset_t base, uint32_t cmd_off, uint32_t cfg, const char *name)
+ {
+ 	gpu_wr(base, cmd_off + 4, cfg);
+-	gpu_wr(base, cmd_off, RCG_ROOT_EN | RCG_UPDATE);
++	gpu_wr(base, cmd_off, RCG_UPDATE);
+ 	for (unsigned i = 0; i < 100; ++i) {
+-		uint32_t v = gpu_rd(base, cmd_off);
+-		if (!(v & RCG_UPDATE)) {
+-			if (v & RCG_ROOT_OFF) {
+-				printf("SWEET GPU: %s rooted at %#x but root still off (%#x)\n",
+-				    name, cfg, v);
+-				return false;
+-			}
+-			printf("SWEET GPU: %s rooted at %#x (%#x)\n", name, cfg, v);
+-			return true;
++		if (!(gpu_rd(base, cmd_off) & RCG_UPDATE)) {
++			break;
+ 		}
+ 		delay(1);
+ 	}
+-	printf("SWEET GPU: %s update did not stick, %#x\n", name, gpu_rd(base, cmd_off));
+-	return false;
++	gpu_wr(base, cmd_off, RCG_ROOT_EN);
++	bool rooted = false;
++	for (unsigned i = 0; i < 100; ++i) {
++		if (!(gpu_rd(base, cmd_off) & RCG_ROOT_OFF)) {
++			rooted = true;
++			break;
++		}
++		delay(1);
++	}
++	printf("SWEET GPU: %s cfg=%#x cmd=%#x, %s\n", name, gpu_rd(base, cmd_off + 4),
++	    gpu_rd(base, cmd_off),
++	    rooted ? "rooted" : "root still off (driven by its branch)");
++	return rooted;
+ }
+ 
+ static void
+@@ -328,6 +356,13 @@
+ 	gpu_rcg_switch(gpu_cc, GPUCC_GX_GFX3D_RCG,
+ 	    pll ? RCG_CFG_CRC_DIV : RCG_CFG_XO, "gfx3d_clk_src");
+ 	/*
++	 * Recommended WAKEUP/SLEEP nibbles for gpu_cc_cx_gmu_clk, done by
++	 * gpucc-sdmmagpie's probe(); the GMU itself stays unstarted.
++	 */
++	uint32_t gmu = gpu_rd(gpu_cc, GPUCC_CX_GMU_CBCR);
++	gpu_wr(gpu_cc, GPUCC_CX_GMU_CBCR, (gmu & ~0xfff0u) | 0x0ff0u);
++
++	/*
+ 	 * ABL leaves gfx.lvl at retention, which does not close the GX switch;
+ 	 * vote SVS first, then NOM if the switch still refuses. The cmd-db
+ 	 * level map decides which index each of those is.
+@@ -366,6 +401,8 @@
+ 		return;
+ 	}
+ 	/* These two were blocked on the gfx3d parent before the domain came up. */
++	gpu_rcg_switch(gpu_cc, GPUCC_GX_GFX3D_RCG,
++	    pll ? RCG_CFG_CRC_DIV : RCG_CFG_XO, "gfx3d_clk_src retry");
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_APB_CBCR, "gpu_cc_cx_apb_clk");
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_GFX3D_CBCR, "gpu_cc_cx_gfx3d_clk");
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_GFX3D_SLV_CBCR, "gpu_cc_cx_gfx3d_slv_clk");
