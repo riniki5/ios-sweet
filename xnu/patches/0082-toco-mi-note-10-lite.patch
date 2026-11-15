@@ -53,7 +53,7 @@ index 4da50d8..5dc56fc 100644
  	}
  	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 03defe6..153f24c 100644
+index 03defe6..a17792e 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -1,9 +1,12 @@
@@ -81,7 +81,7 @@ index 03defe6..153f24c 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
-@@ -32,6 +36,64 @@ void sweet_touch_init(void);
+@@ -32,6 +36,71 @@
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
@@ -133,20 +133,27 @@ index 03defe6..153f24c 100644
 +#define FTS_F_EVT_MOTION 0x23u
 +#define FTS_F_EVT_LEAVE  0x33u
 +#define FTS_F_EVT_ERROR  0xf3u
-+#define FTS_F_SYSCMD     0xa2u
++/* f521_ftsSoftware.h: FTS_CMD_FEATURE is 0xA2 and FTS_CMD_SYSTEM is 0xA4.
++ * Sending a system command through 0xA2 sets a feature instead: the old
++ * "flush" byte pair here enabled glove mode. */
++#define FTS_F_FEATURE    0xa2u
++#define FTS_F_SYSCMD     0xa4u
++#define FTS_F_FLUSH_OP   0xa1u /* FIFO_CMD_FLUSH, one byte (st_ftsTool.c) */
 +#define FTS_F_LOAD       0xa4u
 +#define FTS_F_LOAD_DATA  0x06u
++#define FTS_F_LOAD_INFO  0x01u
 +#define FTS_F_LOAD_RAW   0x30u
++#define FTS_F_LOAD_FILTER 0x31u
++#define FTS_F_LOAD_BASE  0x32u
++#define FTS_F_LOAD_STREN 0x33u
 +#define FTS_F_SPECIAL    0x00u
 +#define FTS_F_FLUSH      0x01u
 +#define FTS_F_PANEL_INIT 0x02u
-+#define FTS_F_LOCKED     0x03u
-+#define FTS_F_LOCKED_ACTIVE 0x00u
 +#define FTS_F_CRC        0x20000078u
  /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
  #define GOODIX_PID_REG   0x4022u
  #define GOODIX_EVENT_REG 0x4180u
-@@ -73,13 +135,19 @@ void sweet_touch_init(void);
+@@ -73,13 +142,19 @@
  
  static struct {
  	vm_offset_t se, gcc, gpio;
@@ -167,7 +174,7 @@ index 03defe6..153f24c 100644
  
  static uint32_t
  touch_rd(vm_offset_t base, uint32_t off)
-@@ -209,12 +277,12 @@ touch_irq(void)
+@@ -209,12 +284,12 @@
  	return st.irq_last;
  }
  
@@ -182,7 +189,7 @@ index 03defe6..153f24c 100644
  		return EIO;
  	}
  	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
-@@ -247,11 +315,16 @@ touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+@@ -247,11 +322,16 @@
  			break;
  		}
  		if (nt && !st.sent && (irq & SE_TX_WM_IRQ)) {
@@ -203,7 +210,7 @@ index 03defe6..153f24c 100644
  			st.sent = nt;
  			touch_wr(st.se, SE_TX_WM, 0);
  		}
-@@ -317,6 +390,358 @@ touch_read(uint8_t addr, uint16_t reg, bool wide, uint8_t *buf, unsigned len)
+@@ -317,6 +397,383 @@
  	return touch_msg(addr, NULL, 0, buf, len, false);
  }
  
@@ -249,12 +256,14 @@ index 03defe6..153f24c 100644
 +	return touch_fti_scan(FTS_F_ACTIVE, on ? FTS_F_MT_BIT : 0u);
 +}
 +
++/* FIFO flush is one opcode byte, 0xA1 (stlib/fts_lib_ftsHardware.h). It is
++ * not a system command: 0xA4 only carries reset/panel-init, 0xA2 features. */
 +static int
 +touch_fti_flush(void)
 +{
-+	const uint8_t cmd[3] = { FTS_F_SYSCMD, FTS_F_SPECIAL, FTS_F_FLUSH };
++	const uint8_t cmd = FTS_F_FLUSH_OP;
 +
-+	return touch_msg(FTS_T_ADDR, cmd, sizeof(cmd), NULL, 0, false);
++	return touch_msg(FTS_T_ADDR, &cmd, 1, NULL, 0, false);
 +}
 +
 +/*
@@ -288,11 +297,54 @@ index 03defe6..153f24c 100644
 +	return (unsigned)h[2] | ((unsigned)h[3] << 8);
 +}
 +
++static uint16_t touch_fti_faddr[4];
++static unsigned touch_fti_fnodes;
++static bool touch_fti_have_frame;
++
++/*
++ * Framebuffer page zero holds whatever the FW loaded last: sysinfo after a
++ * reset, but a frame header (a5 30) after a raw capture, and the frame
++ * pointers at 136 are only meaningful while sysinfo is loaded. Ask for
++ * sysinfo explicitly (f521_ftsCore.c readSysInfo) unless it is already
++ * there, so the addresses can be read and cached once.
++ */
++static bool
++touch_fti_page_sysinfo(void)
++{
++	uint8_t h[4] = { 0, 0, 0, 0 };
++	unsigned before, now;
++
++	if (!touch_fti_fbuf(0, h, sizeof(h)) && h[0] == 0xa5 &&
++	    h[1] == FTS_F_LOAD_INFO) {
++		return true;
++	}
++	const uint8_t req[3] = { FTS_F_LOAD, FTS_F_LOAD_DATA, FTS_F_LOAD_INFO };
++	before = (unsigned)h[2] | ((unsigned)h[3] << 8);
++	int err = touch_msg(FTS_T_ADDR, req, sizeof(req), NULL, 0, false);
++	if (err) {
++		return false;
++	}
++	for (unsigned i = 0; i < 100u; ++i) {
++		touch_wait(20);
++		if (touch_fti_fbuf(0, h, sizeof(h))) {
++			continue;
++		}
++		if (h[0] == 0xa5 && h[1] == FTS_F_LOAD_INFO) {
++			now = (unsigned)h[2] | ((unsigned)h[3] << 8);
++			printf("SWEET TOUCH: fti sysinfo loaded count %u->%u\n", before, now);
++			return true;
++		}
++	}
++	printf("SWEET TOUCH: fti sysinfo reload timeout hdr=%02x %02x\n", h[0], h[1]);
++	return false;
++}
++
 +static void
 +touch_fti_ident(void)
 +{
 +	uint8_t s[32], cfg[8], addr[8];
 +
++	(void)touch_fti_page_sysinfo();
 +	if (touch_fti_fbuf(0, s, sizeof(s))) {
 +		printf("SWEET TOUCH: fti sysinfo err\n");
 +		return;
@@ -315,26 +367,31 @@ index 03defe6..153f24c 100644
 +		unsigned ry = (unsigned)cfg[2] | ((unsigned)cfg[3] << 8);
 +		printf("SWEET TOUCH: fti panel %ux%u tx=%u rx=%u key=%u force=%u\n",
 +		    rx, ry, cfg[4], cfg[5], cfg[6], cfg[7]);
++		if (cfg[4] && cfg[5]) {
++			touch_fti_fnodes = (unsigned)cfg[4] * (unsigned)cfg[5];
++		}
++	}
++	if (!touch_fti_fnodes) {
++		touch_fti_fnodes = 544u;
 +	}
 +	/* Touch frame pointers: raw, filter, strength, baseline. */
 +	if (!touch_fti_fbuf(136, addr, sizeof(addr))) {
-+		printf("SWEET TOUCH: fti frame addr raw=%04x filter=%04x stren=%04x base=%04x\n",
-+		    (unsigned)addr[0] | ((unsigned)addr[1] << 8),
-+		    (unsigned)addr[2] | ((unsigned)addr[3] << 8),
-+		    (unsigned)addr[4] | ((unsigned)addr[5] << 8),
-+		    (unsigned)addr[6] | ((unsigned)addr[7] << 8));
++		for (unsigned i = 0; i < 4; ++i) {
++			touch_fti_faddr[i] =
++			    (uint16_t)((unsigned)addr[i * 2] |
++			    ((unsigned)addr[i * 2 + 1] << 8));
++		}
++		touch_fti_have_frame = touch_fti_faddr[0] >= 8u;
++		printf("SWEET TOUCH: fti frame addr raw=%04x filter=%04x stren=%04x base=%04x nodes=%u\n",
++		    touch_fti_faddr[0], touch_fti_faddr[1], touch_fti_faddr[2],
++		    touch_fti_faddr[3], touch_fti_fnodes);
 +	}
 +}
 +
 +static unsigned
 +touch_fti_nodes(void)
 +{
-+	uint8_t pc[8];
-+
-+	if (!touch_fti_fbuf(80, pc, sizeof(pc)) && pc[4] && pc[5]) {
-+		return (unsigned)pc[4] * (unsigned)pc[5];
-+	}
-+	return 544;
++	return touch_fti_fnodes;
 +}
 +
 +/*
@@ -347,7 +404,8 @@ index 03defe6..153f24c 100644
 +{
 +	uint8_t chunk[60];
 +	unsigned bytes = nodes * 2u;
-+	unsigned nz = 0, mn = 0xffffu, mx = 0, sum = 0, got = 0;
++	unsigned nz = 0, sum = 0, got = 0;
++	int mn = 32767, mx = -32768;
 +
 +	if (bytes > 1200u) {
 +		bytes = 1200u;
@@ -366,8 +424,9 @@ index 03defe6..153f24c 100644
 +			    chunk[17], chunk[18], chunk[19]);
 +		}
 +		for (unsigned i = 0; i + 1 < len; i += 2) {
-+			unsigned v = (unsigned)chunk[i] | ((unsigned)chunk[i + 1] << 8);
-+			if (v) {
++			unsigned u = (unsigned)chunk[i] | ((unsigned)chunk[i + 1] << 8);
++			int v = (int)(int16_t)u;
++			if (u) {
 +				++nz;
 +			}
 +			if (v < mn) {
@@ -376,12 +435,12 @@ index 03defe6..153f24c 100644
 +			if (v > mx) {
 +				mx = v;
 +			}
-+			sum += v;
++			sum += u;
 +		}
 +		got += len;
 +	}
-+	printf("SWEET TOUCH: fti %s %04x nodes=%u got=%u nz=%u min=%04x max=%04x sum=%u\n",
-+	    tag, addr, nodes, got, nz, got ? mn : 0, mx, sum);
++	printf("SWEET TOUCH: fti %s %04x nodes=%u got=%u nz=%u min=%d max=%d sum=%u\n",
++	    tag, addr, nodes, got, nz, got ? mn : 0, got ? mx : 0, sum);
 +}
 +
 +/* Sum and nonzero count of a 16-bit node frame, capped so live samples stay
@@ -409,39 +468,51 @@ index 03defe6..153f24c 100644
 +	return sum;
 +}
 +
++/* One frame row as signed decimals, the shape the stock ms_raw node prints. */
++static bool
++touch_fti_row(uint16_t addr, unsigned count)
++{
++	uint8_t b[68];
++
++	if (!count || count > 34u || touch_fti_fbuf(addr, b, count * 2u)) {
++		return false;
++	}
++	printf("SWEET TOUCH: fti row %04x", addr);
++	for (unsigned i = 0; i < count; ++i) {
++		int v = (int)(int16_t)((unsigned)b[i * 2] |
++		    ((unsigned)b[i * 2 + 1] << 8));
++		printf(" %d", v);
++	}
++	printf("\n");
++	return true;
++}
++
 +/*
-+ * Cheap change detector for the four node frames sysinfo points at (raw,
-+ * filter, strength, baseline): sum and nonzero count of the first 128 nodes.
-+ * Ask for one raw frame first: the load may be on demand, so reading a frame
-+ * the FW never refreshed would look frozen even while the AFE scans.
-+ * Printed a few times a minute so a finger held on the panel shows up as a
-+ * change even when no touch event arrives.
++ * Cheap change detector for the four node frames sysinfo names (raw, filter,
++ * strength, baseline): sum and nonzero count of the first 128 nodes, then one
++ * raw row in stock ms_raw format. The addresses were cached at ident time;
++ * the page at 136 stops being sysinfo once a frame is loaded, so re-reading
++ * it here would return frame bytes. Sampling alone never reloads the frame:
++ * the buffers the FW scans into stay live, and a load would disturb the IC.
 + */
 +static void
 +touch_fti_live(void)
 +{
-+	uint8_t sa[8];
-+	uint16_t addr[4];
-+	unsigned nz[4], sum[4], nodes = touch_fti_nodes();
-+
-+	if (touch_fti_fbuf(136, sa, sizeof(sa))) {
-+		return;
-+	}
-+	for (unsigned i = 0; i < 4; ++i) {
-+		addr[i] = (uint16_t)((unsigned)sa[i * 2] | ((unsigned)sa[i * 2 + 1] << 8));
-+	}
-+	if (addr[0] < 8u) {
-+		return;
-+	}
-+	(void)touch_fti_sync(false, FTS_F_LOAD_RAW, "live");
++	unsigned nz[4], sum[4];
++	unsigned nodes = touch_fti_nodes();
 +	unsigned bytes = nodes * 2u > 256u ? 256u : nodes * 2u;
++
++	if (!touch_fti_have_frame) {
++		return;
++	}
 +	for (unsigned i = 0; i < 4; ++i) {
-+		sum[i] = touch_fti_sum(addr[i], bytes, &nz[i]);
++		sum[i] = touch_fti_sum(touch_fti_faddr[i], bytes, &nz[i]);
 +	}
 +	printf("SWEET TOUCH: fti live polls=%u bytes=%u raw %04x %u/%u filt %04x %u/%u stren %04x %u/%u base %04x %u/%u\n",
 +	    touch_fti_polls, bytes,
-+	    addr[0], sum[0], nz[0], addr[1], sum[1], nz[1],
-+	    addr[2], sum[2], nz[2], addr[3], sum[3], nz[3]);
++	    touch_fti_faddr[0], sum[0], nz[0], touch_fti_faddr[1], sum[1], nz[1],
++	    touch_fti_faddr[2], sum[2], nz[2], touch_fti_faddr[3], sum[3], nz[3]);
++	(void)touch_fti_row(touch_fti_faddr[0], 34u);
 +}
 +
 +/*
@@ -488,81 +559,42 @@ index 03defe6..153f24c 100644
 +/*
 + * The vendor's raw capture (f521.c fts_ms_raw_show) runs the scan for a
 + * settling window, stops it, lets the last conversion land, flushes the event
-+ * FIFO and only then asks for the frame. Mirror that, then fingerprint the
-+ * payload at the framebuffer body and at the address sysinfo names for raw
-+ * data: the FW may load one and not the other.
-+ *
-+ * Each step is an experiment. A fingerprint that changes between two samples
-+ * of a live buffer means the AFE sees the panel; a repeat to the digit means
-+ * it does not.
++ * FIFO and only then asks for the frame. fts_ms_raw_show ends by calling
++ * fts_mode_handler(info, 1), which programs gestures and turns the active
++ * scan back on; without that restore the IC stays in capture state and
++ * reports no touches at all. A capture is therefore rare and self-restoring.
 + */
-+static void
-+touch_fti_rawprobe(void)
++static bool
++touch_fti_capture(const char *tag)
 +{
-+	static const char *const names[4] = { "capraw", "capfilt", "capstren", "capbase" };
-+	uint8_t sa[8];
-+	uint16_t addr[4] = { 0, 0, 0, 0 };
-+	unsigned nodes = touch_fti_nodes();
-+
-+	if (!touch_fti_fbuf(136, sa, sizeof(sa))) {
-+		for (unsigned i = 0; i < 4; ++i) {
-+			addr[i] = (uint16_t)((unsigned)sa[i * 2] | ((unsigned)sa[i * 2 + 1] << 8));
-+		}
++	if (!touch_fti_have_frame) {
++		return false;
 +	}
-+	/* Frames live in the 16-bit framebuffer space; 0x9720 on toco. */
-+	if (addr[0] < 8u) {
-+		addr[0] = 0;
-+	}
-+	/* 1. Vendor capture: scan, stop, settle, flush, load. */
 +	(void)touch_fti_scan(FTS_F_ACTIVE, FTS_F_MT_BIT);
 +	touch_wait(100);
 +	(void)touch_fti_scan(FTS_F_ACTIVE, 0);
 +	touch_wait(50);
 +	(void)touch_fti_flush();
-+	touch_fti_sync(true, FTS_F_LOAD_RAW, "cap");
-+	touch_fti_fingerprint("cap", 4, nodes, true);
-+	if (addr[0]) {
-+		for (unsigned i = 0; i < 4; ++i) {
-+			if (addr[i] >= 8u) {
-+				touch_fti_fingerprint(names[i], addr[i], nodes, false);
-+			}
-+		}
++	bool ready = touch_fti_sync(true, FTS_F_LOAD_RAW, tag);
++	if (ready) {
++		uint8_t h[4] = { 0, 0, 0, 0 };
++		(void)touch_fti_fbuf(0, h, sizeof(h));
++		printf("SWEET TOUCH: fti %s hdr=%02x %02x count=%u\n", tag, h[0], h[1],
++		    (unsigned)h[2] | ((unsigned)h[3] << 8));
++		touch_fti_fingerprint(tag, touch_fti_faddr[0], touch_fti_nodes(), false);
++		(void)touch_fti_row(touch_fti_faddr[0], 34u);
 +	}
-+	/* 2. Locked scanning, so the FW cannot drop back to a low-power state. */
-+	(void)touch_fti_scan(FTS_F_LOCKED, FTS_F_LOCKED_ACTIVE);
-+	touch_wait(100);
-+	if (addr[0]) {
-+		touch_fti_fingerprint("lock0", addr[0], nodes, false);
-+		touch_wait(100);
-+		touch_fti_fingerprint("lock1", addr[0], nodes, false);
-+	}
-+	touch_fti_sync(true, FTS_F_LOAD_RAW, "lock");
-+	/* 3. Active scan without recalibration, the FOD resume variant. */
-+	(void)touch_fti_scan(FTS_F_ACTIVE, 0x20);
-+	touch_wait(100);
-+	if (addr[0]) {
-+		touch_fti_fingerprint("nocal", addr[0], nodes, false);
-+	}
-+	touch_fti_sync(true, FTS_F_LOAD_RAW, "nocal");
-+	/* 4. Panel init, then reset: revalidates the AFE config in CX memory. */
-+	const uint8_t pinit[3] = { FTS_F_SYSCMD, FTS_F_SPECIAL, FTS_F_PANEL_INIT };
-+	int perr = touch_msg(FTS_T_ADDR, pinit, sizeof(pinit), NULL, 0, false);
-+	touch_wait(200);
-+	printf("SWEET TOUCH: fti panel-init=%d\n", perr);
-+	(void)touch_fti_reset();
-+	(void)touch_fti_scan(FTS_F_ACTIVE, FTS_F_MT_BIT);
-+	touch_wait(100);
-+	touch_fti_sync(true, FTS_F_LOAD_RAW, "pinit");
-+	if (addr[0]) {
-+		touch_fti_fingerprint("pinitraw", addr[0], nodes, false);
-+	}
-+	(void)touch_fti_sense(true);
++	const uint8_t gesture[6] = { FTS_F_FEATURE, 0x03, 0x20, 0x00, 0x00, 0x01 };
++	(void)touch_msg(FTS_T_ADDR, gesture, sizeof(gesture), NULL, 0, false);
++	int on = touch_fti_sense(true);
++	printf("SWEET TOUCH: fti %s ready=%d restored sense=%d\n", tag, ready, on);
++	return ready;
 +}
 +
  static int
  touch_goodix_ack(void)
  {
-@@ -425,7 +850,7 @@ touch_goodix(void)
+@@ -425,7 +882,7 @@
  		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
  		/* Low nibble 1/3 denotes pen data in the vendor parser. */
  		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
@@ -571,7 +603,7 @@ index 03defe6..153f24c 100644
  			(void)touch_goodix_ack();
  			return EIO;
  		}
-@@ -446,7 +871,7 @@ touch_focaltech(void)
+@@ -446,7 +903,7 @@
  	uint8_t buf[63];
  	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
  	uint32_t mask = 0, seen = 0;
@@ -580,7 +612,7 @@ index 03defe6..153f24c 100644
  	if (err) {
  		return err;
  	}
-@@ -472,7 +897,7 @@ touch_focaltech(void)
+@@ -472,7 +929,7 @@
  		}
  		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
  		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
@@ -589,7 +621,7 @@ index 03defe6..153f24c 100644
  			return EIO;
  		}
  		mask |= 1u << id;
-@@ -487,6 +912,266 @@ touch_focaltech(void)
+@@ -487,6 +944,267 @@
  	return 0;
  }
  
@@ -768,28 +800,29 @@ index 03defe6..153f24c 100644
 +		x[id] = st.x[id];
 +		y[id] = st.y[id];
 +	}
-+	int err = touch_fti_frame(x, y, &mask);
-+	if (!err) {
-+		touch_report(mask, x, y);
-+	}
-+	/*
-+	 * Re-sample the raw frames while the system runs so a finger on the
-+	 * panel can be measured: roughly every 10 s. The full vendor capture
-+	 * ladder resets the IC, so it stays rare (~every 2 min).
-+	 */
 +	++touch_fti_polls;
-+	/* Sample the IRQ line at loop rate: a touch the IC detects must pull it. */
++	/* Sample the IRQ line before draining: a touch the IC detects pulls it. */
 +	unsigned irq = touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u;
 +	if (irq != touch_fti_irq_last) {
 +		touch_fti_irq_last = irq;
 +		++touch_fti_edges;
 +	}
++	int err = touch_fti_frame(x, y, &mask);
++	if (!err) {
++		touch_report(mask, x, y);
++	}
++	/*
++	 * Sample the node buffers every ~9 s: a finger on the panel must move
++	 * the sums. One vendor-style capture at 6 s, then every 30 s; it
++	 * restores scan mode itself.
++	 */
 +	if ((touch_fti_polls % 900u) == 0) {
 +		touch_fti_live();
 +	}
-+	if (!(touch_fti_polls % 12000u)) {
-+		printf("SWEET TOUCH: fti reprobe at poll %u\n", touch_fti_polls);
-+		touch_fti_rawprobe();
++	if (touch_fti_polls == 600u ||
++	    (touch_fti_polls > 600u && !(touch_fti_polls % 3000u))) {
++		printf("SWEET TOUCH: fti capture at poll %u\n", touch_fti_polls);
++		(void)touch_fti_capture("cap");
 +	}
 +	if ((touch_fti_polls % 1000u) == 0) {
 +		printf("SWEET TOUCH: fti polls=%u last=%02x%02x irq=%#x edges=%u enter=%u motion=%u leave=%u status=%u err=%u hdr=%u\n",
@@ -856,11 +889,10 @@ index 03defe6..153f24c 100644
  static bool
  touch_se_init(void)
  {
-@@ -545,6 +1230,26 @@ touch_se_init(void)
- 	return true;
+@@ -546,6 +1264,26 @@
  }
  
-+static void
+ static void
 +touch_panel_geometry(void)
 +{
 +	DTEntry entry;
@@ -880,10 +912,11 @@ index 03defe6..153f24c 100644
 +	}
 +}
 +
- static void
++static void
  touch_thread(void *arg, wait_result_t result)
  {
-@@ -569,18 +1274,34 @@ touch_thread(void *arg, wait_result_t result)
+ 	unsigned delay_s = 45;
+@@ -569,18 +1307,34 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -923,7 +956,7 @@ index 03defe6..153f24c 100644
  	touch_wait(10); /* conservative rail settling; not a DT timing value */
  	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
  	touch_gpio(7, 1, 0, 0, false, false);
-@@ -589,39 +1310,109 @@ touch_thread(void *arg, wait_result_t result)
+@@ -589,39 +1343,110 @@
  	touch_wait(2);
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
@@ -987,18 +1020,20 @@ index 03defe6..153f24c 100644
 +		    ready, ie, id[0], id[1], fe, fw[0], fw[1],
 +		    touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u);
 +		/*
-+		 * The vendor never writes IER, and its FOD builds restart sensing
-+		 * with a scan off/on pair after the mode handler. Mirror that
-+		 * instead of nudging a register the FW owns.
++		 * Stock order (dmesg): reset, readSysInfo, then fts_mode_handler
++		 * for screen on: gesture feature, active scan, scan off, 50 ms,
++		 * scan on. No panel init and no frame capture at boot: the IC
++		 * must come up scanning, or it reports nothing.
 +		 */
-+		int soff = touch_fti_sense(false);
-+		touch_wait(10);
 +		int son = touch_fti_sense(true);
-+		printf("SWEET TOUCH: fti scan off=%d on=%d dead=%d\n", soff, son, st.dead);
 +		/* Vendor FOD builds program the gesture feature on every screen-on. */
-+		const uint8_t gesture[6] = { 0xa2, 0x03, 0x20, 0x00, 0x00, 0x01 };
++		const uint8_t gesture[6] = { FTS_F_FEATURE, 0x03, 0x20, 0x00, 0x00, 0x01 };
 +		int ger = touch_msg(FTS_T_ADDR, gesture, sizeof(gesture), NULL, 0, false);
-+		printf("SWEET TOUCH: fti gesture=%d\n", ger);
++		int soff = touch_fti_sense(false);
++		touch_wait(50);
++		int son2 = touch_fti_sense(true);
++		printf("SWEET TOUCH: fti mode on=%d gesture=%d off=%d on=%d dead=%d\n",
++		    son, ger, soff, son2, st.dead);
 +		uint8_t ier = 0;
 +		int ierr = touch_fti_read(FTS_F_IER, &ier, 1);
 +		printf("SWEET TOUCH: fti ier err=%d val=%02x\n", ierr, ier);
@@ -1007,7 +1042,6 @@ index 03defe6..153f24c 100644
 +		int cerr = touch_fti_read(FTS_F_CRC, crc, sizeof(crc));
 +		printf("SWEET TOUCH: fti crc err=%d %02x %02x\n", cerr, crc[0], crc[1]);
 +		touch_fti_ident();
-+		touch_fti_rawprobe();
 +		uint8_t e[8];
 +		for (unsigned i = 0; i < 5; ++i) {
 +			touch_wait(100);
@@ -1042,7 +1076,6 @@ index 03defe6..153f24c 100644
  				}
  			} else {
  				errors = 0;
-
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 index 27bc49d..f731110 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
