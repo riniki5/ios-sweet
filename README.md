@@ -6,7 +6,7 @@ This tree ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation)
 
 It is a fork of [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet), the Redmi Note 10 Pro (`sweet`) port, and keeps its patch series. Patch 0082 adds the `toco` hardware: the 1080×2340 panel, the Focaltech FTM5 touch controller and its PM6150L LDO6 rail vote in the RPMh driver. The same kernel, shim and iOS root boot both phones.
 
-As of **2026-11-15** the phone boots to the **iOS home screen**; the touchscreen and the hardware buttons work. Rendering runs entirely on the CPU; there is no GPU driver.
+As of **2026-11-15** the phone boots to the **iOS home screen in about 90 seconds**, the touchscreen and the hardware buttons work, and so does **navigation**: swipe up from the bottom edge to leave an app, and the app switcher works. Rendering runs entirely on the CPU. The Adreno 618 is being brought up bottom-up (patches 0083–0087): its clock block and CX/GX power domains already come up from the kernel, and the next step, the GPU PLL and clock root, is in the tree. No command submission yet, so nothing is drawn through the GPU.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
@@ -14,13 +14,14 @@ As of **2026-11-15** the phone boots to the **iOS home screen**; the touchscreen
 
 | Area | State |
 | --- | --- |
-| Boot | Stock Xiaomi bootloader → `fastboot boot` of our shim → XNU. Nothing is flashed to the boot partitions |
+| Boot | Stock Xiaomi bootloader → `fastboot boot` of our shim → XNU → lock/home screen in about 90 seconds. Nothing is flashed to the boot partitions |
 | CPU | All eight cores via PSCI (`cpus=8`; patch 0078), 16K pages, GICv3 interrupts, timers |
 | Memory | About 3.95 GiB of the upper DDR bank |
 | Storage | Own UFS host driver; the iOS root is a journaled HFS+ volume in `userdata`, read/write |
 | iOS userland | Real iPhone X 16.7.16 root filesystem and shared cache; launchd and the system daemons run |
-| Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services; CoreAnimation renders in software; frames are copied into the bootloader's framebuffer. Presented to iOS as an iPhone X panel (1125×2436) |
-| GUI | backboardd, SpringBoard, lock screen, home screen |
+| Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services; CoreAnimation renders in software; frames are copied into the bootloader's framebuffer. Presented to iOS as an iPhone X panel (1125×2436). Optional render scale (`sweetfb_w`/`sweetfb_h`) rasterises fewer pixels and stretches them to the panel |
+| GUI | backboardd, SpringBoard, lock screen, home screen; the home gesture and app switcher work |
+| GPU bring-up | Adreno 618 (`kgsl-3d0`) GPUCC/GDSC power and PLL0 bring-up from the kernel with `gpu=1 gpu_gx=1`. No firmware, SMMU or rendering |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power, volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
 | Battery | IOPMPowerSource service (static 100 %, charging icon) |
@@ -29,11 +30,10 @@ As of **2026-11-15** the phone boots to the **iOS home screen**; the touchscreen
 
 ## What does not work (yet)
 
-- **Navigation:** you cannot leave an app (the home gesture and AssistiveTouch Home do nothing yet).
-- **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS or SEP / Face ID.** Daemons for them start and fail or keep relaunching.
-- **No GPU.** Everything is drawn by the CPU; the two Cortex-A76 cores add little until the renderer is the bottleneck, and there is no Adreno/KGSL driver.
-- **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty.
-- **Slow boot:** several minutes on the Apple logo.
+- **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS or SEP / Face ID.** Wi-Fi and Bluetooth are a Qualcomm WCN3990 combo behind `icnss`, with firmware loaded through the modem subsystem and an IPA data path: a port needs firmware loading (PIL), SMEM/SMP2P, QMI + WMI and a full driver. Daemons for these start and fail or keep relaunching.
+- **No GPU rendering.** There is no Adreno/KGSL driver yet: no GPU firmware (GMU/zap), SMMU page tables, command ring or Metal frontend. Patches 0083–0087 only bring the power domain and PLL0 up and dump registers, so everything is still drawn by the CPU.
+- **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty. Several apps show a black window (Phone, Photos, Messages) because they need hardware we do not have.
+- **Slow boot:** about 90 seconds on the Apple logo, against a few seconds on a real iPhone.
 - **Security is off:** permissive code signing (AMFI) and sandbox policies, a stub AppleKeyStore, no data protection. Do not put anything personal on it.
 
 ## How it boots
@@ -114,6 +114,8 @@ python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/sweet.adt s
 SWEET_DEVICE=toco shim/build.sh ../shim/out/payload.bin
 ```
 
+The CPU renderer is the frame-time limit on this panel, so the image can also report a smaller logical display: build the ADT with `SWEET_FB_W=828 SWEET_FB_H=1792` (iPhone XR class, 414×896 points at 2×) and boot with the matching `sweetfb_w=828 sweetfb_h=1792`. AppleCLCD then stretches the 828×1792 frames to 1080×2340. The ADT and the boot args must agree.
+
 What the less obvious boot-args do:
 
 | Boot-arg | Effect |
@@ -124,6 +126,9 @@ What the less obvious boot-args do:
 | `wdt=-1 wdt_test=no_user_checkin` | No hardware watchdog |
 | `sweetfb_noconsole=1` | Stop drawing kernel text over the GUI. It still goes to the persistent log; panics are drawn |
 | `sweetfb_hz=60` | Panel copy every vsync tick; lower (`30`, default `10`) to trade smoothness for CPU time |
+| `sweetfb_w=N sweetfb_h=N` | Render at a smaller logical size and stretch it to the panel (see above) |
+| `sweetusb=2` | USB device mode: CDC-ECM gadget plus the live kernel console as UDP to the host |
+| `gpu=1 gpu_gx=1` | Adreno 618 bring-up probe: GPUCC clocks, CX and GX power domains, PLL0, register dump (patches 0083–0087). No rendering |
 | `sweettouch=0`, `sweetkeys=0` | Disable the touch or button driver |
 | `sweettouchdelay=N` | Start the touch thread N seconds after boot (default 45) |
 
@@ -135,7 +140,7 @@ fastboot -S 512M flash userdata ios16-root.simg   # WIPES Android's user data; ~
 fastboot boot shim/out/shim-boot.img
 ```
 
-The first boot takes several minutes on the Apple logo, then the lock screen appears. Swipe up to unlock. To get back to fastboot, hold Power + Volume down.
+The first boot takes about 90 seconds on the Apple logo, then the lock screen appears. Swipe up to unlock. Swipe up to unlock. To get back to fastboot, hold Power + Volume down.
 
 ### 5. Read the kernel log
 
@@ -149,9 +154,10 @@ Useful greps:
 
 ```sh
 grep 'SWEET TOUCH' logs/toco.txt     # IC detect, IER, sense, poll counters, events
-grep 'SWEET RPMH'  logs/toco.txt     # the touch AVDD vote (3000 mV mode=7)
+grep 'SWEET RPMH'  logs/toco.txt     # regulator votes: touch AVDD (3000 mV mode=7), ARC GPU rails
 grep 'SWEET FB'    logs/toco.txt     # swaps/presents, vsync ticks, skipped layers
 grep 'SWEET HID'   logs/toco.txt     # touch registered, panel presented as 1125x2436
+grep 'SWEET GPU'   logs/toco.txt     # GPUCC clocks, CX/GX GDSC, PLL0 lock, RBBM revision
 ```
 
 A healthy touch log contains `SWEET TOUCH: panel 1080x2340 ... vddio=0x...`, `SWEET RPMH: TCS0 ACTIVE 3000 mV mode=7 enable=1`, and poll lines whose `enter`/`motion`/`leave` counters rise while you drag a finger. More detail, including the touch power story and troubleshooting, is in [`docs/TOCO.md`](docs/TOCO.md).
@@ -204,6 +210,9 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0069 | Batched persistent-log flushes |
 | 0070–0081 | PID hibernate, touch edges, USB device mode and Ethernet, 8-core SMP, display power, network traces |
 | 0082 | Xiaomi Mi Note 10 Lite (`toco`): Focaltech touch, PM6150L LDO6 vote in millivolts, 1080×2340 panel |
+| 0083–0084 | Adreno 618 GPUCC: GCC/GPUCC branch clocks and the CX power domain, register dump (`gpu=1`) |
+| 0085–0086 | RPMh ARC votes for `cx.lvl`/`mx.lvl`/`gfx.lvl`: cmd-db lookup plus a single level-index write on the ARC slave, so the GX domain powers up (`gpu_gx=1`) |
+| 0087 | GPU PLL0 (Fabia) start and the GX_GFX3D root clock switched to `crc_div`, so the core is clocked before its registers are read |
 
 ## Key hardware facts
 
@@ -213,6 +222,8 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 - Panel: 1080×2340 continuous splash from ABL; the kernel presents it to iOS as 1125×2436.
 - Touch: Focaltech FTM5 (f521) at I²C `0x49` on QUP SE7 (`0xa84000`), IRQ GPIO 9, reset GPIO 8, VDDIO GPIO 72, AVDD on PM6150L LDO6 at 3.0 V through RPMh.
 - Buttons: power and volume keys on the PM6150 PON block through SPMI.
+- GPU: Adreno 618 (`a615`, chipid `0x06010800`) at `0x05000000`, GPUCC at `0x05090000`, GMU at `0x0506a000`. CX is already up from the bootloader; GX needs a `gfx.lvl` vote through RPMh (ARC slave 3, vote by cmd-db index).
+- Wi-Fi/Bluetooth: Qualcomm WCN3990 combo behind `icnss@18800000` (IPA at `0x01e00000`, BT on the QUP UART at `0x88c000`), not a discrete PCIe card.
 
 More in [`docs/TOCO.md`](docs/TOCO.md) and [`NOTES.md`](NOTES.md).
 
