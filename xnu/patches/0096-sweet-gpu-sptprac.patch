@@ -1,0 +1,77 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -14,6 +14,9 @@
+  * space, not bytes in the GMU aperture (the 0094 reads went 0x1f800 bytes into
+  * a 0x31000 window and stalled the boot thread), and opens the GMU AHB fence
+  * to ALLOW, without which the whole GPU block reads as zero.
++ * 0096 drives A6XX_GMU_GX_SPTPRAC_POWER_CONTROL itself: the GMU reports the GX
++ * GDSC up but GX_CLK_OFF set, and SPTPRAC is what keeps the GPU clock domain
++ * off while the CM3 is still in reset.
+  * No GPU firmware, HFI, SMMU, or command submission; register reads only after
+  * the domain reports powered. The only rail vote is gfx.lvl over the RPMh ARC
+  * path in sweet_rpmh.c. See gpu-report.md.
+@@ -78,6 +81,7 @@
+ #define GMU_SPTPRAC_PWR_STATUS  GMU_REG(0x1f8d0u)
+ #define GMU_RPMH_POWER_STATE    GMU_REG(0x1f8ecu)
+ #define GMU_HFI_CTRL_STATUS     GMU_REG(0x1f980u)
++#define GMU_GX_SPTPRAC_CTRL     GMU_REG(0x1a881u)
+ #define GMU_AO_HOST_INTR_STATUS GMU_REG(0x23b05u)
+ #define GMU_AO_AHB_FENCE_CTRL   GMU_REG(0x23b10u)
+ #define GMU_AHB_FENCE_STATUS    GMU_REG(0x23b13u)
+@@ -86,6 +90,8 @@
+ #define GMU_SP_CLK_OFF          (1u << 4)
+ #define GMU_GX_GDSC_POWER_OFF   (1u << 6)
+ #define GMU_GX_CLK_OFF          (1u << 7)
++#define GMU_SPTPRAC_ON_CTRL     0x00778000u
++#define GMU_SPTPRAC_ON_STATUS   (1u << 3)
+ 
+ /* Fabia alpha PLL (clk-alpha-pll.c: FABIA_* offsets). */
+ #define PLL_MODE                0x0u
+@@ -250,6 +256,39 @@
+ }
+ 
+ /*
++ * SPTPRAC is the GPU's internal power domain. In the vendor tree only GMU
++ * firmware touches A6XX_GMU_GX_SPTPRAC_POWER_CONTROL, but the register itself
++ * sits in the always-on GMU block, and the GMU already tracks our GX GDSC
++ * (SPTPRAC status bit 6 cleared as soon as the GDSC came up) while GX_CLK_OFF
++ * stayed set. Drive it directly and see whether the GX clock leaves halt.
++ */
++static void
++gpu_sptprac_on(void)
++{
++	if (!gpu_gmu || !gpu_gmu_live) {
++		return;
++	}
++	unsigned i;
++	uint32_t st = gpu_rd(gpu_gmu, GMU_SPTPRAC_PWR_STATUS);
++
++	printf("SWEET GPU: sptprac before: ctrl=%#x status=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_GX_SPTPRAC_CTRL), st);
++	gpu_wr(gpu_gmu, GMU_GX_SPTPRAC_CTRL, GMU_SPTPRAC_ON_CTRL);
++	for (i = 0; i < 1000; ++i) {
++		st = gpu_rd(gpu_gmu, GMU_SPTPRAC_PWR_STATUS);
++		if (st & GMU_SPTPRAC_ON_STATUS) {
++			break;
++		}
++		delay(1);
++	}
++	printf("SWEET GPU: sptprac after %u us: ctrl=%#x status=%#x (%s)\n", i,
++	    gpu_rd(gpu_gmu, GMU_GX_SPTPRAC_CTRL), st,
++	    (st & GMU_SPTPRAC_ON_STATUS) ? "on" : "timeout");
++	printf("SWEET GPU: after sptprac: gx branch=%#x rcg=%#x\n",
++	    gpu_rd(gpu_cc, GPUCC_GX_GFX3D_CBCR), gpu_rd(gpu_cc, GPUCC_GX_GFX3D_RCG));
++}
++
++/*
+  * The GX domain is normally owned by the GMU: a6xx_gmu_sptprac_enable() keeps
+  * GX powered through A6XX_GMU_GX_SPTPRAC_POWER_CONTROL and the vendor reads the
+  * result back from SPTPRAC_PWR_CLK_STATUS. With the CM3 still in reset those
+@@ -620,6 +659,7 @@
+ 	 */
+ 	gpu_gmu_fence_allow("gx-on");
+ 	gpu_gmu_report("gx-on");
++	gpu_sptprac_on();
+ 	printf("SWEET GPU: gmu_rcg cmd=%#x cfg=%#x branch=%#x\n",
+ 	    gpu_rd(gpu_cc, GPUCC_GMU_RCG), gpu_rd(gpu_cc, GPUCC_GMU_RCG + 4),
+ 	    gpu_rd(gpu_cc, GPUCC_CX_GMU_CBCR));
