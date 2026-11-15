@@ -926,14 +926,21 @@ index 27bc49d..f731110 100644
  
  	IOLockLock(fLock);
  	bool was = fDown[finger];
-@@ -472,8 +495,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+@@ -472,8 +495,15 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
  		return;
  	}
  	if (!was && down) {
++		/*
++		 * The toco touch field ends ~54 px above the panel bottom (every
++		 * swipe from the very bottom reports y <= 2286 of 2340), so the
++		 * bottom band is wider than the sides; a home swipe has to start
++		 * inside it to carry FromEdgeTip.
++		 */
++		int bottom = fPanelH / 20;
 -		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
 -		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
 +		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x >= fPanelW - SWEET_TOUCH_EDGE_PX ||
-+		    y < SWEET_TOUCH_EDGE_PX || y >= fPanelH - SWEET_TOUCH_EDGE_PX;
++		    y < SWEET_TOUCH_EDGE_PX || y >= fPanelH - bottom;
  	}
  
  	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
