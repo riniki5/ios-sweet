@@ -40,6 +40,16 @@ DEVICE = os.environ.get('SWEET_DEVICE', 'sweet')
 if DEVICE not in PANEL_H:
     raise SystemExit(f'unknown SWEET_DEVICE={DEVICE!r} (expected {", ".join(PANEL_H)})')
 FB_W, FB_H, FB_STRIDE = 1080, PANEL_H[DEVICE], 1080 * 4
+# Render scale, for machines whose display is drawn by CoreAnimation's CPU
+# renderer: report a smaller logical display (boot args sweetfb_w/sweetfb_h)
+# and let AppleCLCD stretch it over the panel. 828x1792 @2x is the iPhone XR
+# class, 414x896 points, 1.85x fewer pixels to fill than 1125x2436.
+SCALE_W = int(os.environ.get('SWEET_FB_W') or 0)
+SCALE_H = int(os.environ.get('SWEET_FB_H') or 0)
+SCALED = 0 < SCALE_W < FB_W and 0 < SCALE_H < FB_H
+DISPLAY_SCALE = int(os.environ.get('SWEET_FB_SCALE') or 2) if SCALED else 3
+LOGICAL_W = SCALE_W if SCALED else 1125
+LOGICAL_H = SCALE_H if SCALED else 2436
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
@@ -113,8 +123,9 @@ def build(seed=None, qemu=False, highmem=False):
         # MobileGestalt's screen class: display-scale (u32, default 0) comes
         # from /chosen, the pixel size from IOMobileFramebuffer. Scale 0 makes
         # SpringBoard's FBSDisplayMode "infxinf@0x" invalid. 1080x2400 @3x =
-        # 360x800 points (like iPhone X class devices).
-        ('display-scale', u32(3)),
+        # 360x800 points (like iPhone X class devices); the render scale
+        # (SWEET_FB_W/H) reports 828x1792 @2x = 414x896 points (XR class).
+        ('display-scale', u32(DISPLAY_SCALE)),
         # XNU derives IOPlatformUUID (gethostuuid) from these on arm; without
         # them CFPreferences cannot use kCFPreferencesCurrentHost (no ByHost
         # files), so e.g. DataMigration never records LastSystemVersion and
@@ -188,14 +199,14 @@ def build(seed=None, qemu=False, highmem=False):
         node('wdt', [ph(), ('no-pmu', u32(1))]),
         # Main display: IOMobileFramebuffer.framework counts /arm-io children
         # with this device_type and reads the canvas size from the node
-        # (the presented iPhone X size, see SweetFramebuffer.cpp);
+        # (the presented display size, see SweetFramebuffer.cpp);
         # the kernel's AppleCLCD matches the compatible string.
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(1125)),
-            ('canvas-height', u32(2436)),
+            ('canvas-width', u32(LOGICAL_W)),
+            ('canvas-height', u32(LOGICAL_H)),
         ])])
 
     fbcon = node('sweet-fbcon', [
@@ -229,6 +240,12 @@ def build(seed=None, qemu=False, highmem=False):
     ])
 
     product_props = d22ap_product()
+    if product_props and SCALED:
+        # The artwork matches the screen: 2x, and the subtype is the pixel
+        # height of the device class (D22AP: 2436, XR class: 1792).
+        product_props = [(k, u32(DISPLAY_SCALE) if k == 'artwork-scale-factor'
+                          else u32(LOGICAL_H) if k == 'artwork-device-subtype' else v)
+                         for k, v in product_props]
     product = [node('product', [ph()] + product_props)] if product_props else []
 
     # Panic log region. /pram reg = <phys size>; it sits just above the
