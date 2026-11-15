@@ -1,0 +1,39 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -40,6 +40,8 @@
+ #define GPUCC_GX_CXO_CBCR       0x1060u
+ #define GPUCC_CX_GDSCR          0x106cu
+ #define GPUCC_AHB_CBCR          0x1078u
++#define GPUCC_CRC_AHB_CBCR      0x107cu
++#define GPUCC_CXO_AON_CBCR      0x1004u
+ #define GPUCC_CX_APB_CBCR       0x1088u
+ #define GPUCC_CX_SNOC_DVM_CBCR  0x108cu
+ #define GPUCC_CX_CXO_CBCR       0x109cu
+@@ -325,7 +327,9 @@
+ 	}
+ 	uint32_t ahb = gpu_rd(gpu_gcc, GCC_GPU_CFG_AHB_CBCR);
+ 	uint32_t gpll = gpu_rd(gpu_gcc, GCC_GPU_GPLL0_CTL);
+-	printf("SWEET GPU: gcc gpu-cfg-ahb=%#x gpu-gpll0-ctl=%#x\n", ahb, gpll);
++	printf("SWEET GPU: gcc gpu-cfg-ahb=%#x memnoc=%#x snoc-dvm=%#x gpu-gpll0-ctl=%#x\n",
++	    ahb, gpu_rd(gpu_gcc, GCC_GPU_MEMNOC_CBCR),
++	    gpu_rd(gpu_gcc, GCC_GPU_SNOC_DVM_CBCR), gpll);
+ 	if (ahb == 0xffffffffu) {
+ 		printf("SWEET GPU: GCC not answering, aborting\n");
+ 		return;
+@@ -351,6 +355,16 @@
+ 	}
+ 	/* Halt checks read CLK_OFF; enabling the branch again is idempotent. */
+ 	gpu_clock_on(gpu_cc, GPUCC_AHB_CBCR, "gpu_cc_ahb_clk");
++	/* The RCG/CRC subsystem and the AON half of the block have their own AHB. */
++	gpu_clock_on(gpu_cc, GPUCC_CRC_AHB_CBCR, "gpu_cc_crc_ahb_clk");
++	gpu_clock_on(gpu_cc, GPUCC_CXO_AON_CBCR, "gpu_cc_cxo_aon_clk");
++	/*
++	 * kgsl's "mem_clk"/"mem_iface_clk": the GPU's AHB path lives in GCC, so
++	 * without these the core reads back as zeros whatever GPUCC does. 0x7100c
++	 * is voted (the halt bit stays set), hence the result is not checked.
++	 */
++	gpu_clock_on(gpu_gcc, GCC_GPU_MEMNOC_CBCR, "gcc_gpu_memnoc_gfx_clk");
++	gpu_clock_on(gpu_gcc, GCC_GPU_SNOC_DVM_CBCR, "gcc_gpu_snoc_dvm_gfx_clk");
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_APB_CBCR, "gpu_cc_cx_apb_clk");
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_SNOC_DVM_CBCR, "gpu_cc_cx_snoc_dvm_clk");
+ 	gpu_clock_on(gpu_cc, GPUCC_CX_CXO_CBCR, "gpu_cc_cxo_clk");
