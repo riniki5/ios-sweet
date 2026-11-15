@@ -1,31 +1,29 @@
-# ios-sweet
+# ios-sweet — iOS 16 on the Xiaomi Mi Note 10 Lite (`toco`)
 
-**Apple's iOS 16 running on a Redmi Note 10 Pro.**
+**Apple's iOS 16 running on a Xiaomi Mi Note 10 Lite.**
 
-This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
+This tree ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Mi Note 10 Lite (`toco`, Qualcomm SM7150G / Snapdragon 730G, 6.47" 1080×2340). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
 
-As of **2026-10-18** the phone boots to the **iOS home screen**. You can unlock it, open Settings, pull down Control Center and the notification center, and use the touchscreen and the hardware buttons. Rendering runs entirely on the CPU; there is no GPU driver.
+It is a fork of [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet), the Redmi Note 10 Pro (`sweet`) port, and keeps its patch series. Patch 0082 adds the `toco` hardware: the 1080×2340 panel, the Focaltech FTM5 touch controller and its PM6150L LDO6 rail vote in the RPMh driver. The same kernel, shim and iOS root boot both phones.
+
+As of **2026-11-15** the phone boots to the **iOS home screen**; the touchscreen and the hardware buttons work. Rendering runs entirely on the CPU; there is no GPU driver.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
-
-## Also on the Xiaomi Mi Note 10 Lite (`toco`)
-
-This fork carries a port to the **Mi Note 10 Lite** (`toco`, SM7150G / Snapdragon 730G, 1080×2340) alongside `sweet`. Patch 0082 adds the Focaltech FTM5 touch controller, its PM6150L LDO6 rail vote and the 2340-pixel panel geometry; the same kernel, shim and iOS root boot both phones. The build steps differ only in `SWEET_DEVICE=toco` and the boot-args. See **[docs/TOCO.md](docs/TOCO.md)** for the hardware differences, the flashing guide and the touch troubleshooting notes.
 
 ## What works
 
 | Area | State |
 | --- | --- |
 | Boot | Stock Xiaomi bootloader → `fastboot boot` of our shim → XNU. Nothing is flashed to the boot partitions |
-| CPU | 6 of the 8 cores (the six Cortex-A55s) via PSCI, 16K pages, GICv3 interrupts, timers |
+| CPU | All eight cores via PSCI (`cpus=8`; patch 0078), 16K pages, GICv3 interrupts, timers |
 | Memory | About 3.95 GiB of the upper DDR bank |
 | Storage | Own UFS host driver; the iOS root is a journaled HFS+ volume in `userdata`, read/write |
 | iOS userland | Real iPhone X 16.7.16 root filesystem and shared cache; launchd and the system daemons run |
 | Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services; CoreAnimation renders in software; frames are copied into the bootloader's framebuffer. Presented to iOS as an iPhone X panel (1125×2436) |
-| GUI | backboardd, SpringBoard, lock screen, home screen, Control Center, notification center, Settings |
-| Touch | Goodix GT9896 over I²C (GENI), rail enabled through RPMh, delivered as HID digitizer events |
+| GUI | backboardd, SpringBoard, lock screen, home screen |
+| Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power, volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
-| Battery | IOPMPowerSource service (static 100 %, charging icon; real fuel-gauge readout prepared) |
+| Battery | IOPMPowerSource service (static 100 %, charging icon) |
 | Device identity | iPhone X (`iPhone10,3` / `D22AP`): no Home button, gesture UI |
 | Activation | Native "Hactivation" path of mobileactivationd, chosen through device-tree security status. No Apple servers involved |
 
@@ -33,9 +31,9 @@ This fork carries a port to the **Mi Note 10 Lite** (`toco`, SM7150G / Snapdrago
 
 - **Navigation:** you cannot leave an app (the home gesture and AssistiveTouch Home do nothing yet).
 - **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS or SEP / Face ID.** Daemons for them start and fail or keep relaunching.
-- **No GPU.** Everything is drawn by the CPU at roughly 20–30 fps. The two Cortex-A76 cores are not used yet.
+- **No GPU.** Everything is drawn by the CPU; the two Cortex-A76 cores add little until the renderer is the bottleneck, and there is no Adreno/KGSL driver.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty.
-- **Slow boot:** about 4 minutes on the Apple logo.
+- **Slow boot:** several minutes on the Apple logo.
 - **Security is off:** permissive code signing (AMFI) and sandbox policies, a stub AppleKeyStore, no data protection. Do not put anything personal on it.
 
 ## How it boots
@@ -49,17 +47,17 @@ ABL (stock Xiaomi bootloader, unlocked)
               -> dyld + shared cache -> launchd -> daemons -> backboardd + SpringBoard
 ```
 
-There is no serial port (the debug UART is wired as SPI on this board). The kernel draws its console into the framebuffer that ABL leaves at `0x9c000000`, and keeps a persistent 4 MiB log ring at the end of `userdata`. You read that log from OrangeFox recovery with `tools/sweet-log-pull.sh`, so you don't have to film the screen.
+There is no serial port. The kernel draws its console into the framebuffer that ABL leaves at `0x9c000000`, and keeps a persistent 4 MiB log ring at the end of `userdata`. You read that log from TWRP with `tools/sweet-log-pull.sh`, so you don't have to film the screen.
 
 ## How to do it yourself
 
-You need a Redmi Note 10 Pro (`sweet`, global or Indian variant, SM7150) with an **unlocked bootloader**, a Linux PC, and a GitHub account for the kernel build. This is the exact path used for the screenshots above; other variants or firmware may need changes. **Everything on `userdata` is lost.** Bootloaders, recovery, modem and persist partitions are never touched.
+You need a Mi Note 10 Lite with an **unlocked bootloader**, a Linux PC (or WSL2), `aarch64-linux-gnu-gcc`, `mkbootimg`, `img2simg`, `hfsprogs`, `apfs-fuse`, and a GitHub account for the kernel build. **Everything on `userdata` is lost.** Bootloaders, recovery, modem and persist partitions are never touched.
 
 ### 0. Back up the phone
 
-Boot OrangeFox (or any recovery with adb root) temporarily and pull at least `persist`, `modemst1`, `modemst2`, `fsg`, `fsc` and `boot`, `dtbo`, `vbmeta`. They contain per-device calibration data. Keep them off git; `.gitignore` already excludes `backup/`, `dtb/` and `recovery/`.
+Boot TWRP (temporary `fastboot boot twrp.img`) and pull at least `persist`, `modemst1`, `modemst2`, `fsg`, `fsc`, `boot`, `dtbo` and `vbmeta`. They contain per-device calibration data. Keep them off git; `.gitignore` already excludes `backup/`, `dtb/` and `recovery/`.
 
-The shim needs the stock DTB. Unpack your phone's stock `boot.img`:
+The shim packs your stock DTB into the boot image. Unpack **your own** `boot.img`:
 
 ```sh
 python3 tools/unpack_bootv2.py backup/boot.img dtb/boot_unpacked   # -> dtb/boot_unpacked/dtb
@@ -101,13 +99,19 @@ ipsw img4 im4p extract research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im
 
 ### 3. Build the boot image
 
-Needs `aarch64-linux-gnu-gcc` and `mkbootimg`.
+Needs `aarch64-linux-gnu-gcc` and `mkbootimg`. `SWEET_DEVICE=toco` tells `mkadt.py` and the shim to advertise the 1080×2340 panel; the kernel's touch driver detects the board from that height by itself.
 
 ```sh
-python3 tools/mkadt.py shim/out/sweet.adt --highmem
+tools/toco-shim.sh xnu/out/kernel.development.sweet     # -> shim/out/shim-boot.img
+```
+
+The script runs the three steps for you:
+
+```sh
+SWEET_DEVICE=toco python3 tools/mkadt.py shim/out/sweet.adt --highmem
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/sweet.adt shim/out/payload.bin \
-    --cmdline 'debug=0xc serial=3 cpus=6 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30'
-shim/build.sh ../shim/out/payload.bin      # -> shim/out/shim-boot.img
+    --cmdline 'debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=60'
+SWEET_DEVICE=toco shim/build.sh ../shim/out/payload.bin
 ```
 
 What the less obvious boot-args do:
@@ -115,36 +119,42 @@ What the less obvious boot-args do:
 | Boot-arg | Effect |
 | --- | --- |
 | `rd=ufsroot0 ufsrw=1 rootrw=1` | Root on the `userdata` partition, writable |
-| `cpus=6` | Start the six A55 cores; `cpus=1` is the safe fallback |
+| `cpus=8` | Start all eight cores (two A76 + six A55). Fall back to `cpus=6` or `cpus=1` if a unit resets during boot |
 | `launchd_unsecure_cache=1` | launchd accepts its job cache without AMFI |
 | `wdt=-1 wdt_test=no_user_checkin` | No hardware watchdog |
 | `sweetfb_noconsole=1` | Stop drawing kernel text over the GUI. It still goes to the persistent log; panics are drawn |
-| `sweetfb_hz=30` | Panel refresh rate of the CPU copy |
+| `sweetfb_hz=60` | Panel copy every vsync tick; lower (`30`, default `10`) to trade smoothness for CPU time |
 | `sweettouch=0`, `sweetkeys=0` | Disable the touch or button driver |
+| `sweettouchdelay=N` | Start the touch thread N seconds after boot (default 45) |
 
 ### 4. Flash the root and boot
 
 ```sh
-fastboot -S 512M flash userdata ios16-root.simg   # ~7 minutes; do not unplug
+fastboot -S 512M flash userdata ios16-root.simg   # WIPES Android's user data; ~7 minutes; do not unplug
 # Xiaomi's fastboot often hangs after a large flash: re-enter fastboot with Power + Volume down
 fastboot boot shim/out/shim-boot.img
 ```
 
-The first boot takes about 4–5 minutes on the Apple logo, then the lock screen appears. Swipe up to unlock. To get back to fastboot, hold Power + Volume down.
+The first boot takes several minutes on the Apple logo, then the lock screen appears. Swipe up to unlock. To get back to fastboot, hold Power + Volume down.
 
 ### 5. Read the kernel log
 
 ```sh
-fastboot boot recovery/recovery.img        # OrangeFox, temporary
-tools/sweet-log-pull.sh logs/boot.txt      # 4 MiB console ring from the end of userdata
+fastboot boot recovery/recovery.img      # TWRP, temporary
+tools/sweet-log-pull.sh logs/toco.txt    # 4 MiB console ring from the end of userdata
 adb reboot bootloader
 ```
 
-The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces of backboardd and SpringBoard, and the drivers' `SWEET ...` lines. `tools/sweet-crash.py` symbolicates them against the shared cache.
+Useful greps:
 
-### QEMU
+```sh
+grep 'SWEET TOUCH' logs/toco.txt     # IC detect, IER, sense, poll counters, events
+grep 'SWEET RPMH'  logs/toco.txt     # the touch AVDD vote (3000 mV mode=7)
+grep 'SWEET FB'    logs/toco.txt     # swaps/presents, vsync ticks, skipped layers
+grep 'SWEET HID'   logs/toco.txt     # touch registered, panel presented as 1125x2436
+```
 
-`tools/qemu-sweet.py` boots the same kernel on QEMU `virt` with a test RAM-disk root. It is useful for kernel-only changes; see `NOTES.md`.
+A healthy touch log contains `SWEET TOUCH: panel 1080x2340 ... vddio=0x...`, `SWEET RPMH: TCS0 ACTIVE 3000 mV mode=7 enable=1`, and poll lines whose `enter`/`motion`/`leave` counters rise while you drag a finger. More detail, including the touch power story and troubleshooting, is in [`docs/TOCO.md`](docs/TOCO.md).
 
 ## Repository layout
 
@@ -153,8 +163,9 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `shim/` | Bare-metal boot shim (C + asm) packed as an Android boot.img v2 |
 | `xnu/patches/` | The XNU patch series (applied in order by CI), plus staging scripts for libpthread, HFS and BearSSL |
 | `.github/workflows/xnu.yml` | Kernel CI build |
-| `tools/mkadt.py` | Generates the Apple Device Tree from sweet's MMIO layout and the iPhone X identity |
+| `tools/mkadt.py` | Generates the Apple Device Tree (`SWEET_DEVICE=toco` for the 1080×2340 panel) |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
+| `tools/toco-shim.sh` | One command from kernel artifact to flashable `shim-boot.img` |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
 | `tools/sweet-log-pull.sh`, `sweet-log.py` | Read the persistent kernel log from recovery |
@@ -162,8 +173,8 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `tools/xnu-cc.py` | Local single-file compile check from a CI log |
 | `tools/qemu-sweet.py` | QEMU test boots with framebuffer text decoding |
 | `tools/adt.py`, `remotezip.py`, `unpack_bootv2.py`, `sparsediff.py` | Helpers |
+| `docs/TOCO.md` | Port notes: the `toco`/`sweet` hardware differences, touch rail, troubleshooting |
 | `NOTES.md` | Detailed engineering log: every boot, crash and decision, plus hardware facts |
-| `docs/TOCO.md` | Xiaomi Mi Note 10 Lite (`toco`) port: differences, build, flash, troubleshooting |
 
 Not in git: partition backups, live device trees, recovery images, Apple firmware and root images, and downloaded or generated build trees. They contain device serials and calibration data, or Apple's copyrighted files.
 
@@ -199,12 +210,12 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 - RAM: payloads use the upper bank, `0x100000000` + `0xfcc00000` (about 3.95 GiB), above Qualcomm's protected carve-outs.
 - GICv3 with security extensions: the timer goes through Group 1 IRQ (virtual timer INTID 19), not FIQ as on Apple silicon.
 - PSCI through `smc`, 19.2 MHz timer, ARMv8.2 without pointer authentication. MPIDR uses Aff1 for the core number.
-- Panel: 1080×2400 DSC video mode, continuous splash from ABL, no refresh kick needed.
-- Touch: Goodix GT9896 at I²C `0x5d` on QUP SE7 (`0xa84000`), powered by PM6150L LDO11 through RPMh.
-- Buttons: power and volume down on the PM6150 PON block, volume up on PM6150L GPIO2 (SPMI SID 4).
+- Panel: 1080×2340 continuous splash from ABL; the kernel presents it to iOS as 1125×2436.
+- Touch: Focaltech FTM5 (f521) at I²C `0x49` on QUP SE7 (`0xa84000`), IRQ GPIO 9, reset GPIO 8, VDDIO GPIO 72, AVDD on PM6150L LDO6 at 3.0 V through RPMh.
+- Buttons: power and volume keys on the PM6150 PON block through SPMI.
 
-More in [`NOTES.md`](NOTES.md).
+More in [`docs/TOCO.md`](docs/TOCO.md) and [`NOTES.md`](NOTES.md).
 
 ## Credits
 
-Built on Apple's open-source releases (xnu, IOHIDFamily, libpthread, hfs), [BearSSL](https://bearssl.org), [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build), [ipsw](https://github.com/blacktop/ipsw), Qualcomm/Xiaomi's published Linux kernel sources for the hardware details, and [OrangeFox Recovery](https://orangefox.download). iOS itself is Apple's and is not distributed here.
+Built on Apple's open-source releases (xnu, IOHIDFamily, libpthread, hfs), [BearSSL](https://bearssl.org), [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build), [ipsw](https://github.com/blacktop/ipsw), Qualcomm/Xiaomi's published Linux kernel sources for the hardware details (including the Focaltech `st,fts` driver), and [TWRP](https://twrp.me). iOS itself is Apple's and is not distributed here.

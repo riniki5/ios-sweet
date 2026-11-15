@@ -5,8 +5,9 @@
 Toco = Xiaomi Mi Note 10 Lite (SM7150G, 1080x2340). Same XNU/shim as sweet, fork
 `riniki5/ios-sweet`, branch `main`; 0082-toco-mi-note-10-lite.patch carries the
 panel size, RPMh touch rail, the Focaltech FTI/FTM5 driver (`sweet_touch.c`) and
-the HID panel size. User-facing guide: `docs/TOCO.md`; `tools/toco-shim.sh`
-packages a kernel into a toco shim-boot.img.
+the HID panel size. User-facing guide: the README (toco-first); `docs/TOCO.md`
+holds the hardware/protocol notes; `tools/toco-shim.sh` packages a kernel into a
+toco shim-boot.img.
 
 **State: touch works (verified 2026-11-15, log15).** Root cause of the dead AFE
 was a unit regression in 0082: the RPMh VRM voltage data word is millivolts
