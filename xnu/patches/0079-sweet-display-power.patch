@@ -53,7 +53,7 @@
 +		fb->fBlanked = true;
 +		IOLockUnlock(fb->fLock);
 +		if (blank) {
-+			bzero(fb->fPixels, (size_t)fb->fRowBytes * fb->fHeight);
++			bzero((void *)fb->fPixels, (size_t)fb->fRowBytes * fb->fHeight);
 +		}
 +		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
 +		return;
