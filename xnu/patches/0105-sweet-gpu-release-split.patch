@@ -1,0 +1,34 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -58,6 +58,15 @@
+  * fastest flush - and the log thread now prints a tick line per fast wakeup (a
+  * ring ending in tick N says the thread itself ran N times) and retries a
+  * failed write instead of ending.
++ * log45 finally has the whole picture: ticks 1-13 around the prestart reads
++ * (gmu_clk_src 0/0), the preset reads (cm3-cfg 0x52, sfr 0x6018000) and
++ * "releasing cm3", then ticks 10-13 inside the 400 ms pause and nothing more -
++ * no tick 14, so the machine dies within one 100 ms tick of the release
++ * writes, before the "released 20 ms ago" marker. log37 said the same thing at
++ * a 10 s cadence, so the wall has always been here. 0105 puts a marker and a
++ * pause before each of the two release writes; log46 names whichever one
++ * wedges: the WFI clear, the SYSRESET clear, or the CM3 taking the bus down
++ * once it starts.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -1718,9 +1727,13 @@
+ 	gpu_pause(300);
+ 	printf("SWEET GPU: gmu preset reads cm3-cfg=%#x sfr=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_CFG), gpu_rd(gpu_gmu, GMU_HFI_SFR_ADDR));
+-	printf("SWEET GPU: releasing cm3\n");
+-	gpu_pause(400);
++	printf("SWEET GPU: releasing cm3: wfi=0\n");
++	gpu_pause(300);
+ 	gpu_wr(gpu_gmu, GMU_CX_GMU_WFI_CONFIG, 0);
++	printf("SWEET GPU: wfi cleared\n");
++	gpu_pause(300);
++	printf("SWEET GPU: releasing cm3: sysreset=0\n");
++	gpu_pause(400);
+ 	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
+ 	/*
+ 	 * No GMU register is touched for 20 ms after the release: if the CM3
