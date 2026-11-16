@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0114.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0115.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -76,7 +76,14 @@ and prints the readback. log57 then showed the boot config sticking
 (`boot-cfg 0x2 fence-range0 0x80a008a0`), the worker release completing, and
 the CM3 still not fetching, so 0114 re-roots `gmu_clk_src` on GPLL0_DIV at
 200 MHz - mainline's "known rate" for GMU bring-up, and the value the toco
-DTB's `gmu-pwrlevels` name - instead of the 19.2 MHz TCXO root.
+DTB's `gmu-pwrlevels` name - instead of the 19.2 MHz TCXO root. That build
+never flushed a line (the ring header still carried log57's total), and the
+kernel's strings do contain the new marker, so the mux write itself stopped the
+machine: it selected parent 6 without first enabling that parent's GCC branch
+(`gcc_gpu_gpll0_div_clk_src`, 0x52004 bit 16, which `clk_set_rate()` would have
+enabled for it) and it ran with `gpu_cc_cx_gmu_clk` already on. 0115 enables
+the GCC branch, then programs the mux from `sweet_gpu_init()` before the GMU
+branch is enabled, the vendor's `gmu_enable_clks()` order.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
