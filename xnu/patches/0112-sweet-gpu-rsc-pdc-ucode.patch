@@ -1,0 +1,180 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -126,6 +126,16 @@
+  * config), leaves no GMU access after start on the boot thread, and brackets
+  * kernel_thread_start and the pause after it with markers so log54 says which
+  * call the boot thread dies in.
++ * log55 (0110-as-0111, stub 2, gpu_xrel): kernel_thread_start returns kr=0,
++ * thread_deallocate returns, the worker's release store returns, and the worker
++ * keeps reading and printing - but the CM3 still does not execute: sentinel 0,
++ * FW_INIT_RESULT 0 for 2000 ms, FW_BUSY 0, CM3_SYSRESET holding the written 0,
++ * CM3_CFG 0x52, SPTPRAC 0x94. So the release lands on a core that is held
++ * somewhere else, and the one vendor cold-boot step this driver still skips is
++ * _load_gmu_rpmh_ucode(): 0112 adds the RSCC sequencer (words 0x23404-0x23580)
++ * and the PDC windows from the toco DTB (cfg 0xb290000, seq 0xb490000),
++ * including the a618 variants (0x30090 selector, TCS3 data 0x2), behind
++ * gpu_rpmh=1.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -148,6 +158,9 @@
+ #define GMU_PA          0x0506a000u
+ #define SMMU_PA         0x05040000u
+ #define GCC_PA          0x00100000u
++/* toco DTB: qcom,gmu reg-names "kgsl_gmu_pdc_cfg" and "kgsl_gmu_pdc_seq". */
++#define PDC_CFG_PA      0x0b290000u
++#define PDC_SEQ_PA      0x0b490000u
+ 
+ /* GCC gpu branches (gcc-sdmmagpie.c). */
+ #define GCC_GPU_CFG_AHB_CBCR    0x71004u
+@@ -219,6 +232,34 @@
+ #define GMU_RPMH_POWER_STATE    GMU_REG(0x1f8ecu)
+ #define GMU_PWR_COL_IFC         GMU_REG(0x1f8c0u)
+ #define GMU_RPMH_CTRL           GMU_REG(0x1f8e8u)
++/* adreno_a6xx_gmu.c _load_gmu_rpmh_ucode(): RSCC/PDC sequencer state. */
++#define GMU_RSCC_STATUS0        GMU_REG(0x23404u)
++#define GMU_RSCC_PDC_SEQ_START  GMU_REG(0x23408u)
++#define GMU_RSCC_PDC_MATCH_LO   GMU_REG(0x23409u)
++#define GMU_RSCC_PDC_MATCH_HI   GMU_REG(0x2340au)
++#define GMU_RSCC_PDC_SLAVE_ID   GMU_REG(0x2340bu)
++#define GMU_RSCC_TCS_ADDR       GMU_REG(0x2340du)
++#define GMU_RSCC_TCS_DATA       GMU_REG(0x2340eu)
++#define GMU_RSCC_OVERRIDE_ADDR  GMU_REG(0x23500u)
++#define GMU_RSCC_SEQ_MEM        GMU_REG(0x23580u)
++#define RSC_CMD_OFFSET  2u
++#define PDC_CMD_OFFSET  4u
++/* a6xx_reg.h PDC word offsets; _regwrite() in the vendor tree shifts by 2. */
++#define PDC_GPU_ENABLE_PDC              0x1140u
++#define PDC_GPU_SEQ_START_ADDR          0x1148u
++#define PDC_GPU_TCS1_CONTROL            0x1572u
++#define PDC_GPU_TCS1_CMD_ENABLE_BANK    0x1573u
++#define PDC_GPU_TCS1_CMD_WAIT_BANK      0x1574u
++#define PDC_GPU_TCS1_CMD0_MSGID         0x1575u
++#define PDC_GPU_TCS1_CMD0_ADDR          0x1576u
++#define PDC_GPU_TCS1_CMD0_DATA          0x1577u
++#define PDC_GPU_TCS3_CONTROL            0x15d6u
++#define PDC_GPU_TCS3_CMD_ENABLE_BANK    0x15d7u
++#define PDC_GPU_TCS3_CMD_WAIT_BANK      0x15d8u
++#define PDC_GPU_TCS3_CMD0_MSGID         0x15d9u
++#define PDC_GPU_TCS3_CMD0_ADDR          0x15dau
++#define PDC_GPU_TCS3_CMD0_DATA          0x15dbu
++#define PDC_ENABLE_REG_VALUE            0x80000001u
+ /*
+  * a6xx_gmu.xml.h: RPMH_INTERFACE=1, LLC=0x10, DDR=0x100, MX=0x200,
+  * CX=0x400, GFX=0x800. The inter-frame base value is the vendor write; the
+@@ -281,6 +322,7 @@
+ #define RCG_CFG_GPLL0    (RCG_CFG_SRC(5) | RCG_CFG_DIV(1)) /* src 5 = GPLL0_MAIN */
+ 
+ static vm_offset_t gpu_cc, gpu_gcc, gpu_core, gpu_gmu, gpu_smmu;
++static volatile uint32_t *gpu_pdc_cfg, *gpu_pdc_seq;
+ static bool gpu_dead;
+ static bool gpu_gmu_live;
+ 
+@@ -1897,6 +1939,85 @@
+ 	    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x130));
+ }
+ 
++/*
++ * a6xx_gmu_fw_start() runs _load_gmu_rpmh_ucode() unconditionally on cold boot
++ * and before the CM3 image: the RSCC sequencer runs the GPU's RPMh sleep/wake
++ * commands and the PDC owns the power-up sequence. Without it the CM3 never
++ * leaves reset on this part (log55: store accepted, busy=0, no FW_INIT_RESULT).
++ * a618 also takes the 0x30090 / 0x2 PDC variants.
++ */
++static void
++gpu_rpmh_ucode(void)
++{
++	uint32_t i;
++
++	printf("SWEET GPU: rpmh ucode begin rsc-status0=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_RSCC_STATUS0));
++	gpu_wr(gpu_gmu, GMU_RSCC_STATUS0, 1u << 24);
++	gpu_wr(gpu_gmu, GMU_RSCC_PDC_SLAVE_ID, 1);
++	gpu_wr(gpu_gmu, GMU_RSCC_TCS_DATA, 0);
++	gpu_wr(gpu_gmu, GMU_RSCC_TCS_ADDR, 0);
++	gpu_wr(gpu_gmu, GMU_RSCC_TCS_DATA + RSC_CMD_OFFSET * 4, 0);
++	gpu_wr(gpu_gmu, GMU_RSCC_TCS_ADDR + RSC_CMD_OFFSET * 4, 0);
++	gpu_wr(gpu_gmu, GMU_RSCC_TCS_DATA + RSC_CMD_OFFSET * 8, 0x80000000u);
++	gpu_wr(gpu_gmu, GMU_RSCC_TCS_ADDR + RSC_CMD_OFFSET * 8, 0);
++	gpu_wr(gpu_gmu, GMU_RSCC_OVERRIDE_ADDR, 0);
++	gpu_wr(gpu_gmu, GMU_RSCC_PDC_SEQ_START, 0x4520u);
++	gpu_wr(gpu_gmu, GMU_RSCC_PDC_MATCH_LO, 0x4510u);
++	gpu_wr(gpu_gmu, GMU_RSCC_PDC_MATCH_HI, 0x4514u);
++	gpu_wr(gpu_gmu, GMU_RSCC_SEQ_MEM, 0xa7a506a0u);
++	gpu_wr(gpu_gmu, GMU_RSCC_SEQ_MEM + 4, 0xa1e6a6e7u);
++	gpu_wr(gpu_gmu, GMU_RSCC_SEQ_MEM + 8, 0xa2e081e1u);
++	gpu_wr(gpu_gmu, GMU_RSCC_SEQ_MEM + 12, 0xe9a982e2u);
++	gpu_wr(gpu_gmu, GMU_RSCC_SEQ_MEM + 16, 0x0020e8a8u);
++	printf("SWEET GPU: rpmh rsc status0 now %#x match %#x/%#x seq %#x\n",
++	    gpu_rd(gpu_gmu, GMU_RSCC_STATUS0),
++	    gpu_rd(gpu_gmu, GMU_RSCC_PDC_MATCH_LO),
++	    gpu_rd(gpu_gmu, GMU_RSCC_PDC_MATCH_HI),
++	    gpu_rd(gpu_gmu, GMU_RSCC_SEQ_MEM));
++	if (!gpu_pdc_cfg || !gpu_pdc_seq) {
++		printf("SWEET GPU: rpmh pdc window not mapped\n");
++		return;
++	}
++	gpu_pdc_seq[0] = 0xfebea1e1u;
++	for (i = 0; i < 5; ++i) {
++		static const uint32_t seq[5] = {
++			0xfebea1e1u, 0xa5a4a3a2u, 0x8382a6e0u, 0xbce3e284u,
++			0x002081fcu
++		};
++		gpu_pdc_seq[i] = seq[i];
++	}
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD_ENABLE_BANK] = 7;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD_WAIT_BANK] = 0;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CONTROL] = 0;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_MSGID] = 0x10108u;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_ADDR] = 0x30010u;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_DATA] = 1;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_MSGID + PDC_CMD_OFFSET] = 0x10108u;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_ADDR + PDC_CMD_OFFSET] = 0x30000u;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_DATA + PDC_CMD_OFFSET] = 0;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_MSGID + PDC_CMD_OFFSET * 2] = 0x10108u;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_ADDR + PDC_CMD_OFFSET * 2] = 0x30090u;
++	gpu_pdc_cfg[PDC_GPU_TCS1_CMD0_DATA + PDC_CMD_OFFSET * 2] = 0;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD_ENABLE_BANK] = 7;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD_WAIT_BANK] = 0;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CONTROL] = 0;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_MSGID] = 0x10108u;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_ADDR] = 0x30010u;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_DATA] = 2;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_MSGID + PDC_CMD_OFFSET] = 0x10108u;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_ADDR + PDC_CMD_OFFSET] = 0x30000u;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_DATA + PDC_CMD_OFFSET] = 2;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_MSGID + PDC_CMD_OFFSET * 2] = 0x10108u;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_ADDR + PDC_CMD_OFFSET * 2] = 0x30090u;
++	gpu_pdc_cfg[PDC_GPU_TCS3_CMD0_DATA + PDC_CMD_OFFSET * 2] = 3;
++	gpu_pdc_cfg[PDC_GPU_SEQ_START_ADDR] = 0;
++	gpu_pdc_cfg[PDC_GPU_ENABLE_PDC] = PDC_ENABLE_REG_VALUE;
++	printf("SWEET GPU: rpmh pdc enable=%#x tcs1-en=%#x seq0=%#x\n",
++	    gpu_pdc_cfg[PDC_GPU_ENABLE_PDC],
++	    gpu_pdc_cfg[PDC_GPU_TCS1_CMD_ENABLE_BANK], gpu_pdc_seq[0]);
++}
++
+ static bool
+ gpu_gmu_boot_try(void)
+ {
+@@ -1960,6 +2081,12 @@
+ 	printf("SWEET GPU: cx-gmu cbcr now %#x gx-gmu %#x\n",
+ 	    gpu_rd(gpu_cc, GPUCC_CX_GMU_CBCR), gpu_rd(gpu_cc, GPUCC_GX_GMU_CBCR));
+ 	gpu_pause(300);
++	int rpmhu = 0;
++	PE_parse_boot_argn("gpu_rpmh", &rpmhu, sizeof(rpmhu));
++	if (rpmhu) {
++		gpu_rpmh_ucode();
++		gpu_pause(300);
++	}
+ 	int xrel = 0;
+ 	PE_parse_boot_argn("gpu_xrel", &xrel, sizeof(xrel));
+ 	if (xrel) {
+@@ -2070,6 +2197,8 @@
+ 	gpu_smmu = ml_io_map(SMMU_PA, 0x10000);
+ 	gpu_core = ml_io_map(GPU_PA, 0x40000);
+ 	gpu_gmu = ml_io_map(GMU_PA, 0x31000);
++	gpu_pdc_cfg = (volatile uint32_t *)ml_io_map(PDC_CFG_PA, 0x10000);
++	gpu_pdc_seq = (volatile uint32_t *)ml_io_map(PDC_SEQ_PA, 0x10000);
+ 	if (!gpu_gcc || !gpu_cc || !gpu_core) {
+ 		printf("SWEET GPU: register mapping failed\n");
+ 		return;
