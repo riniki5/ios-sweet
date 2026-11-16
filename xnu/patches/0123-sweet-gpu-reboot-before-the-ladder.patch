@@ -1,0 +1,50 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -2054,8 +2054,13 @@
+ static void gpu_gmu_stub(int mode);
+ 
+ /* Set by the release worker when its last marker is flushed, so the boot
+- * thread waits for the verdict instead of guessing. */
++ * thread waits for the verdict instead of guessing. gpu_xrel_ran tells
++ * sweet_gpu_init that the core has been released: every later GPU/GMU access
++ * from this thread is off limits (log63 and the 0122 boot both stop in the
++ * ladder right after the release window, which leaves the phone hung with no
++ * adb and no reboot). */
+ static volatile int gpu_xrel_done;
++static volatile int gpu_xrel_ran;
+ 
+ static void
+ gpu_cm3_release_thread(__unused void *arg, __unused wait_result_t wr)
+@@ -2406,7 +2411,19 @@
+ 		printf("SWEET GPU: xrel main alive after release window done=%d\n",
+ 		    gpu_xrel_done);
+ 		(void)sweet_log_sync();
+-		gpu_pause(300);
++		gpu_xrel_ran = 1;
++		/* The ladder below reads GPUCC, GX and the GMU; with the core out
++		 * of reset that is what hung the 0122 boot after the log was
++		 * already safe. Reboot from here instead and let init return. */
++		int rb2 = 0;
++
++		PE_parse_boot_argn("gpu_reboot", &rb2, sizeof(rb2));
++		if (rb2) {
++			printf("SWEET GPU: xrel reboot after release window t=%llu\n",
++			    gpu_uptime_ms());
++			(void)sweet_log_sync();
++			reboot_kernel(RB_QUICK | RB_NOSYNC, "gpu release probe done");
++		}
+ 		return false;
+ 	}
+ 	printf("SWEET GPU: releasing cm3: wfi=0\n");
+@@ -2666,6 +2683,11 @@
+ 	gpu_gmu_fence_allow("gx-on");
+ 	gpu_gmu_report("gx-on");
+ 	gpu_gmu_boot_try();
++	if (gpu_xrel_ran) {
++		printf("SWEET GPU: init stops, the release probe owned the gmu\n");
++		(void)sweet_log_sync();
++		return;
++	}
+ 	gpu_sptprac_on();
+ 	printf("SWEET GPU: gmu_rcg cmd=%#x cfg=%#x branch=%#x\n",
+ 	    gpu_rd(gpu_cc, GPUCC_GMU_RCG), gpu_rd(gpu_cc, GPUCC_GMU_RCG + 4),

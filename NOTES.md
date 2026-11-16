@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0122.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0123.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -145,7 +145,13 @@ clock source makes the CM3 run the stub. The same log shows ITCM writes working
 again once reset is re-asserted (each candidate re-plants the stub), so 0122
 reads the stub's own TCM footprint after halting: 0x130 non-zero means the core
 executed and `FW_INIT_RESULT` silence is an address-map problem, zero means it
-never ran. The two `CACHED_LOAD_BOOT` candidates are dropped.
+never ran. The two `CACHED_LOAD_BOOT` candidates are dropped. The first 0122 boot then
+never came back from `fastboot boot` (no adb, no fastboot): with the cached
+candidates gone the worker finishes and the boot thread walks into the ladder,
+which reads GPUCC/GX/GMU with the core already released. 0123 stops
+`sweet_gpu_init` right after `gpu_gmu_boot_try()` when `gpu_xrel` ran and
+reboots from inside the release branch while the ring is already flushed, so a
+probe can never again leave the phone hung without a log.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
