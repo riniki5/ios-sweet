@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0119.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0121.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -111,7 +111,32 @@ after tick 60 or the log thread stops flushing once `sweetlogfast` hands over.
 `sweet_ufs.c` (shared `sweet_log_flushed`/`seq`, same UFS lock) and the probe
 calls it after every release-window marker, in the boot thread's wait loop, at
 `sptprac before`, and twice around `reboot_kernel`. The ring then ends at the
-last access that returned, not at the last periodic flush.
+last access that returned, not at the last periodic flush. log62 (0119) is the
+first ring past tick 60: `xrel ao 0x7728140 -> 0x7901954` in 100 ms = 19.8 MHz,
+i.e. the AO counter runs off CXO, so the GMU is clocked and `busy=0x71000000`
+(kgsl's `CXGXCPUBUSYIGNAHB`, bit 30) says it is not idle either - but the
+sentinel read and the boot thread's own `alive 3000 ms` sync never reached the
+disk. 0120 releases the CM3 once per candidate `gpu_cc_gmu_clk_src` parent
+(`gpll0-div200`, `xo`, `gpll0-main`, `src2`) and once per parent with
+`CACHED_LOAD_BOOT`, each switch made with the branch gated off (0114 died
+switching it live), flushing a `clktry N ... release` line before every store;
+`gpu_uptime_ms()` stamps every marker and `sweet_log_sync()` gives up on the
+UFS lock after ~1 s (`CMD_TIMEOUT_NS` 5 s -> 1 s), so a stalled command can no
+longer freeze the log thread, the worker and the boot thread at once. log63
+(0120, stub 2) then ends at `clktry 0 store returned` while the boot thread
+keeps printing its ticks to t=46351: the worker stops on the first post-release
+read of CM3 ITCM. log62 says the same thing from the other side - there the
+ITCM read was scheduled right after the AO pair, and the ring ends exactly at
+the AO line, never reaching the read's own print. Every GMU register-block read
+(`FW_INIT_RESULT`, `FW_BUSY`, AO counter, AO busy) returns across the release
+in both boots, so the CM3's TCM window - not the AHB path as a whole - is what
+stops answering. Since stub 2 already stores 0xBABEFACE into `FW_INIT_RESULT`
+through the firmware image's own 0x81714 address, the sentinel test never
+needed TCM at all. 0121 polls `FW_INIT_RESULT` only, gives candidate 0 log62's
+full 2000 ms window while the rest get 120 ms, leaves the ITCM read as a named
+`tcm probe ... before/after` pair at the very end (a missing `after` line is
+the proof), and replaces the boot thread's fixed wait with a worker-done flag
+(24 x 500 ms ceiling).
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
