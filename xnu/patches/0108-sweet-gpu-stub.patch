@@ -1,0 +1,131 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -87,10 +87,25 @@
+  * mx.lvl to 193), gpu_smmu=1 (read the GPU SMMU GR0 state at 0x5040000) and
+  * gpu_norelease=1, which stops after the preset so the clock and rail
+  * changes can be measured with the CM3 still in reset.
++ * log50 never came back to USB: with the CM3 held in reset nothing wedges, so
++ * the machine stayed in iOS instead of dying back to recovery. That is why
++ * 0108 adds gpu_reboot (call reboot_kernel(RB_QUICK) at the end of the probe,
++ * so a surviving boot returns to recovery by itself) and gpu_stub, which
++ * replaces the firmware's entry point with sixteen words of our own Thumb code
++ * and nothing else: every exception vector points at the same loop, so a fault
++ * cannot walk into the half-written image table. Stub 1 spins; stub 2 first
++ * stores 0x5EED1234 to TCM 0x130 and then repeats the image's own init-result
++ * write from offset 0x2eb0 - `str 0xBABEFACE, [0x81714]` - taking both
++ * operands out of the image's own literal pool, so the CM3 address of the
++ * register block never has to be derived. A hang at the release with stub 1 is
++ * the core or its clock, not the firmware's memory traffic; 0xBABEFACE in
++ * FW_INIT_RESULT with stub 2 proves the CM3 runs and its register writes land
++ * where the host reads.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <sys/reboot.h>
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+@@ -1767,6 +1782,42 @@
+ 	}
+ }
+ 
++/*
++ * A sixteen-word CM3 program: the image's reset vector and none of its code.
++ * Word 0 stays the image's stack pointer (0x43f80, in GMU SRAM), word 1 points
++ * at 0x100, and words 2-15 all point there too so an exception lands in the
++ * same loop instead of walking through a table the image only fills in later.
++ * The loop touches no stack and no memory but TCM, so nothing here depends on
++ * the SMMU, the RPMh sequencer or an HFI buffer.
++ */
++static void
++gpu_gmu_stub(int mode)
++{
++	uint32_t i;
++
++	for (i = 1; i < 16; ++i) {
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + i * 4, 0x00000101u);
++	}
++	if (mode == 1) {
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x100, 0xe7fee7feu);
++	} else {
++		/* ldr r3,[0x118]; ldr r2,[0x11c]; str r3,[r2];
++		 * ldr r2,[0x120]; ldr r1,[0x124]; str r1,[r2]; b . */
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x100, 0x4a064b05u);
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x104, 0x4a066013u);
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x108, 0x60114906u);
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x10c, 0xbf00e7feu);
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x118, 0x5eed1234u);
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x11c, 0x00000130u);
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x120, 0x00081714u);
++		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x124, 0xbabefaceu);
++	}
++	printf("SWEET GPU: stub%d planted: vec1=%#x code=%#x sentinel=%#x\n",
++	    mode, gpu_rd(gpu_gmu, GMU_CM3_ITCM + 4),
++	    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x100),
++	    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x130));
++}
++
+ static bool
+ gpu_gmu_boot_try(void)
+ {
+@@ -1800,13 +1851,21 @@
+ 	gpu_pause(300);
+ 	printf("SWEET GPU: gmu preset reads cm3-cfg=%#x sfr=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_CFG), gpu_rd(gpu_gmu, GMU_HFI_SFR_ADDR));
+-	int norelease = 0;
++	int norelease = 0, stub = 0;
+ 	PE_parse_boot_argn("gpu_norelease", &norelease, sizeof(norelease));
+ 	if (norelease) {
+ 		printf("SWEET GPU: gpu_norelease leaves cm3 in reset\n");
+ 		gpu_pause(300);
+ 		return false;
+ 	}
++	PE_parse_boot_argn("gpu_stub", &stub, sizeof(stub));
++	if (stub) {
++		printf("SWEET GPU: stub %d replaces the firmware entry point\n",
++		    stub);
++		gpu_pause(300);
++		gpu_gmu_stub(stub);
++		gpu_pause(300);
++	}
+ 	printf("SWEET GPU: releasing cm3: wfi=0\n");
+ 	gpu_pause(300);
+ 	gpu_wr(gpu_gmu, GMU_CX_GMU_WFI_CONFIG, 0);
+@@ -1855,6 +1914,16 @@
+ 	    gpu_rd(gpu_gmu, GMU_HFI_CTRL_STATUS),
+ 	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET),
+ 	    gpu_rd(gpu_gmu, GMU_CM3_FW_BUSY));
++	if (stub) {
++		/* The sentinel is the real answer: the stub writes it to TCM before
++		 * it repeats the image's init-result store, so a set sentinel with a
++		 * clear magic separates "CM3 runs" from "CM3 register writes land". */
++		printf("SWEET GPU: stub%d sentinel=%#x fw-init=%#x\n", stub,
++		    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x130), init);
++		gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 1);
++		printf("SWEET GPU: stub%d cm3 back in reset\n", stub);
++		return false;
++	}
+ 	if (init == GMU_FW_INIT_DONE) {
+ 		printf("SWEET GPU: gmu firmware is up; SPTPRAC belongs to the CM3 now\n");
+ 		return true;
+@@ -2109,5 +2178,19 @@
+ 		gpu_dump_at(gpu_gmu, "gmuspt", GMU_SPTPRAC_PWR_STATUS, 12);
+ 		gpu_dump_at(gpu_gmu, "gmuao", GMU_AO_AHB_FENCE_CTRL, 4);
+ 	}
++	/*
++	 * A probe that does not wedge leaves the machine in iOS, where there is
++	 * no adb to pull the ring with. gpu_reboot=1 makes the probe end in a
++	 * quick ungraceful reboot instead: several fast wakeups pass first so the
++	 * log thread lands the lines above, then the SoC resets into recovery.
++	 */
++	int rb = 0;
++
++	PE_parse_boot_argn("gpu_reboot", &rb, sizeof(rb));
++	if (rb) {
++		printf("SWEET GPU: gpu_reboot, back to recovery for the log\n");
++		gpu_pause(600);
++		reboot_kernel(RB_QUICK | RB_NOSYNC, "gpu probe done");
++	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

@@ -21,6 +21,40 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
+**GPU (Adreno 618/a615) under test: 0108.** The bring-up lives in
+`bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
+`gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
+`gpu_norelease`, `gpu_stub`, `gpu_reboot` for the later stages).
+Verified on device: CX/GX GDSC, GPUCC branches, PLL0 and SPTPRAC; the gfx3d
+root clock still will not leave ROOT_OFF; `a618_gmu.bin` loads, reads back and
+the preset runs, but releasing the CM3 never yields `0xBABEFACE`. Patches
+0100-0103 produced no usable log: the kernel dies faster than the log thread
+flushed, because the "250 ms" markers were `delay(250)` and `delay()` is
+microseconds. 0104 makes each marker a real `tsleep` (hz ticks), prints
+`SWEET LOG: tick N` on every 100 ms wakeup for the first 6 s so the ring says
+whether the writer survived, prints a marker before every post-release GMU
+read, and retries a failed write. log46 (0105) localized the hang: the WFI
+clear returns, and the boot thread stops at the `CM3_SYSRESET=0` store while
+ticks, vsync and the flush counter keep running - one CPU stuck on a GPU
+store, not a dead bus. log47 showed `gpu_gmuclk=1` never fired (the gate
+required ROOT_OFF, which is clear when the mux reads 0x0). 0106 prints right
+after the SYSRESET store, fixes that gate, and adds `gpu_pwrcol=1` (vendor
+`PWR_COL_INTER_FRAME_CTRL=0x9C40400` + the six `RPMH_CTRL` enables); log48/49
+then stop as a whole machine at the release, GBIF is not halted, and 0107 adds
+`gpu_rails`/`gpu_smmu`/`gpu_norelease`. log50 never came back to USB because
+holding the CM3 in reset lets the machine reach iOS, so 0108 adds `gpu_reboot`
+(quick reboot at the end of the probe) and `gpu_stub`: a sixteen-word Thumb
+program replaces the firmware entry point, so the release can be tested with
+no firmware image, no SMMU and no buffers at all.
+Per-log ground truth: local `work-toco/gpu-report.md`.
+
+**Patch hygiene (learned from run 43812998562).** A green build does not prove
+the patch applied: 0103 had been diffed from the 0101 tree, dxb's patch step
+skipped it whole, and the "0103" kernel behaved exactly like 0102. Every new
+patch is now a diff from the previous run's `xnu-buildtree` artifact
+(`xnu/bsd/dev/sweet_*.c`), applied in a scratch tree and compared before the
+push.
+
 **Kernel under test: c028073 (CI run 43705708600).** Strips the AFE probes
 (watch sums, panel-init experiment, 12 s raw capture all removed; ident/IER/
 sysinfo/crc prints and sense+gesture init stay, poll print every 1000 polls) and
