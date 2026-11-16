@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0117 + 0118.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0119.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -103,7 +103,15 @@ that tail after tick 60 because fast logging hands over to `ufslogsecs` and
 0117 adds the discriminator left: the GMU always-on counter (0x1f888/9) and
 the AO busy statuses (0x23b0c/d), read 100 ms apart in the worker - frozen
 means nothing in the GMU is clocked, moving means the CM3 is clocked and the
-reset never reaches the core.
+reset never reaches the core. log61 (0117 + 0118) is a new boot but decodes to
+the same 380 lines and the same `total` 19521 as log60: the 2500 ms pause got
+nothing later onto disk, so either the machine stops within the next second
+after tick 60 or the log thread stops flushing once `sweetlogfast` hands over.
+0119 makes that irrelevant: the flush body becomes `sweet_log_sync()` in
+`sweet_ufs.c` (shared `sweet_log_flushed`/`seq`, same UFS lock) and the probe
+calls it after every release-window marker, in the boot thread's wait loop, at
+`sptprac before`, and twice around `reboot_kernel`. The ring then ends at the
+last access that returned, not at the last periodic flush.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
