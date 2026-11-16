@@ -1,0 +1,205 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -45,10 +45,19 @@
+  * log42 showed the blind spot rather than new hardware state: the ring still
+  * held the previous gpu=0 boot's 24 minute SpringBoard log, so a kernel that
+  * dies in under a second leaves nothing saying whether it even started. 0102
+- * makes the log self-identifying (sweet_ufs.c writes once before its first
+- * sleep and can be paced at hz/10 with sweetlogfast=1) and makes this bring-up
+- * print, pause, then touch the risky register, so the last durable line names
+- * the access that wedged the machine.
++ * makes the log self-identifying (hz/10 cadence with sweetlogfast=1) and makes
++ * this bring-up print, pause, then touch the risky register, so the last
++ * durable line names the access that wedged the machine. log43 (0102 with a
++ * write before the first sleep) stops at the log banner, flush #1, 7234 B, and
++ * never reaches a second flush, which is why that write stays behind the first
++ * sleep now and every marker is a real sleep. The "0103" patch had been
++ * diffed from the 0101 tree, so dxb skipped it whole and log44 ran 0102 again;
++ * 0104 carries the sleep-first change rediffed against the tree CI really
++ * builds, plus two instrument fixes: those markers used delay(), which is
++ * microseconds, so the whole prestart-to-release path ran faster than the
++ * fastest flush - and the log thread now prints a tick line per fast wakeup (a
++ * ring ending in tick N says the thread itself ran N times) and retries a
++ * failed write instead of ending.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -58,6 +67,7 @@
+ #include <pexpert/pexpert.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern int hz;
+ extern int sweet_rpmh_arc_probe(const char *res);
+ extern int sweet_rpmh_arc_raise(const char *res, unsigned target);
+ void sweet_gpu_init(void);
+@@ -203,6 +213,19 @@
+ 	__asm__ volatile("dsb osh" ::: "memory");
+ }
+ 
++/*
++ * delay() is microseconds, which is far shorter than the log thread's flush
++ * period, so the marker before a risky access has to be a real sleep for the
++ * flush to land. sweetlogfast=1 wakes that thread every hz/10 ticks.
++ */
++static int gpu_wait_chan;
++
++static void
++gpu_pause(int ms)
++{
++	(void)tsleep(&gpu_wait_chan, PZERO, "gpuwait", MAX(hz * ms / 1000, 1));
++}
++
+ static bool
+ gpu_clock_on(vm_offset_t base, uint32_t off, const char *name)
+ {
+@@ -1619,29 +1642,29 @@
+ 
+ 	PE_parse_boot_argn("gpu_gbif", &gbif, sizeof(gbif));
+ 	PE_parse_boot_argn("gpu_gmuclk", &clk, sizeof(clk));
+-	/* Print, pause, read, print, pause: with sweetlogfast=1 the pause is
+-	 * longer than the flush interval, so a marker survives a hang in the
+-	 * access that follows it and the log names the fatal register. */
++	/* Print, sleep, read, print, sleep: the sleep is longer than the log
++	 * thread's flush period, so a marker survives a hang in the access that
++	 * follows it and the log names the fatal register. */
+ 	printf("SWEET GPU: prestart begin gbif=%d\n", gbif);
+-	delay(250);
++	gpu_pause(300);
+ 	uint32_t rcg = gpu_rd(gpu_cc, GPUCC_GMU_RCG);
+ 	uint32_t cfg = gpu_rd(gpu_cc, GPUCC_GMU_RCG_CFG);
+ 
+ 	printf("SWEET GPU: prestart gmu_clk_src=%#x/%#x\n", rcg, cfg);
+-	delay(250);
++	gpu_pause(300);
+ 	if (gbif) {
+ 		uint32_t halt = gpu_rd(gpu_core, GBIF_HALT);
+ 
+ 		printf("SWEET GPU: gbif halt=%#x ack=%#x\n",
+ 		    halt, gpu_rd(gpu_core, GBIF_HALT_ACK));
+-		delay(250);
++		gpu_pause(300);
+ 		if (halt != 0) {
+ 			gpu_wr(gpu_core, GBIF_HALT, 0);
+ 			delay(1);
+ 			printf("SWEET GPU: gbif halt now %#x ack=%#x\n",
+ 			    gpu_rd(gpu_core, GBIF_HALT),
+ 			    gpu_rd(gpu_core, GBIF_HALT_ACK));
+-			delay(250);
++			gpu_pause(300);
+ 		}
+ 	}
+ 	if (clk && (rcg & RCG_ROOT_OFF)) {
+@@ -1691,9 +1714,12 @@
+ 	gpu_wr(gpu_gmu, GMU_AHB_FENCE_RANGE_0, GMU_FENCE_RANGE_MASK);
+ 	gpu_wr(gpu_gmu, GMU_HFI_SFR_ADDR, 0x06018000u);
+ 	gpu_gmu_prestart();
+-	printf("SWEET GPU: gmu preset done, cm3-cfg=%#x sfr=%#x, releasing cm3\n",
++	printf("SWEET GPU: gmu preset done, no gmu read yet\n");
++	gpu_pause(300);
++	printf("SWEET GPU: gmu preset reads cm3-cfg=%#x sfr=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_CFG), gpu_rd(gpu_gmu, GMU_HFI_SFR_ADDR));
+-	delay(250);
++	printf("SWEET GPU: releasing cm3\n");
++	gpu_pause(400);
+ 	gpu_wr(gpu_gmu, GMU_CX_GMU_WFI_CONFIG, 0);
+ 	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
+ 	/*
+@@ -1701,21 +1727,21 @@
+ 	 * itself takes the bus down, this marker is the last thing in the log
+ 	 * and the failure is in the firmware, not in our polling.
+ 	 */
+-	delay(20);
++	gpu_pause(20);
+ 	printf("SWEET GPU: cm3 released 20 ms ago, no gmu read yet\n");
+-	delay(250);
++	gpu_pause(300);
+ 	printf("SWEET GPU: post-release rbbm=%#x\n", gpu_core_rev());
+ 	/* One marker per access: whichever line is last names the stuck one. */
+ 	printf("SWEET GPU: reading fw-init\n");
+-	delay(250);
++	gpu_pause(300);
+ 	uint32_t init = gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT);
+ 	printf("SWEET GPU: post-release fw-init=%#x\n", init);
+ 	printf("SWEET GPU: reading busy\n");
+-	delay(250);
++	gpu_pause(300);
+ 	printf("SWEET GPU: post-release busy=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_FW_BUSY));
+ 	printf("SWEET GPU: reading reset\n");
+-	delay(250);
++	gpu_pause(300);
+ 	printf("SWEET GPU: post-release reset=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
+ 	unsigned i;
+@@ -1724,7 +1750,7 @@
+ 		if (init == GMU_FW_INIT_DONE) {
+ 			break;
+ 		}
+-		delay(1);
++		gpu_pause(1);
+ 	}
+ 	printf("SWEET GPU: gmu cm3 released, %u ms in fw-init=%#x hfi=%#x"
+ 	    " reset=%#x busy=%#x\n", i, init,
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -677,14 +677,20 @@
+  *   | u64 flush sequence
+  * ring offset of byte n = n % ring size. Read it from a recovery with
+  * tools/sweet-log-pull.sh. Disabled with boot-arg sweetlog=0.
+- * The thread flushes every ufslogsecs (default 10) seconds, or every hz/10
+- * ticks with sweetlogfast=1. The first write stays behind the first sleep: the
+- * build that wrote at t=0 (log43) stops at the log banner and never reaches a
+- * second flush.
++ * The thread flushes every ufslogsecs (default 10) seconds; with
++ * sweetlogfast=1 its first SWEET_LOG_FAST_TICKS wakeups come every hz/10
++ * ticks and each prints a tick line, so a ring that ends in tick N says the
++ * thread itself ran N times, and a ring that ends at the banner says it never
++ * got a second turn. After that window it falls back to ufslogsecs. The first
++ * write stays behind the first sleep: the build that wrote at t=0 (log43)
++ * stops at the log banner and never reaches a second flush. A failed write
++ * retries on the next tick instead of ending the thread, so a transient error
++ * no longer looks like a dead machine.
+  */
+ #define SWEET_LOG_SIZE          (4u << 20)
+ #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
+ #define SWEET_LOG_SECS          10u
++#define SWEET_LOG_FAST_TICKS    60u
+ 
+ static char sweet_log_ring[SWEET_LOG_SIZE];
+ static uint64_t _Atomic sweet_log_total;
+@@ -748,6 +754,7 @@
+ {
+ 	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
+ 	uint64_t flushed = 0, seq = 0;
++	unsigned fast = 0, fails = 0;
+ 	void *bounce = (void *)(su.dma + DMA_BOUNCE);
+ 	int wait = sweet_log_fast ? MAX(hz / 10, 1) : hz * (int)sweet_log_secs;
+ 
+@@ -755,6 +762,12 @@
+ 	    " flush every %d ticks\n", SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base, wait);
+ 	for (;;) {
+ 		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", wait);
++		if (sweet_log_fast && fast < SWEET_LOG_FAST_TICKS) {
++			printf("SWEET LOG: tick %u\n", ++fast);
++			if (fast == SWEET_LOG_FAST_TICKS) {
++				wait = hz * (int)sweet_log_secs;
++			}
++		}
+ 		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
+ 		if (total == flushed) {
+ 			continue;
+@@ -787,9 +800,12 @@
+ 		}
+ 		lck_mtx_unlock(&sweet_ufs_lock);
+ 		if (error) {
+-			printf("SWEET LOG: write failed (%d), stopping\n", error);
+-			return;
++			if (++fails == 1) {
++				printf("SWEET LOG: write failed (%d), retrying\n", error);
++			}
++			continue;
+ 		}
++		fails = 0;
+ 		flushed = total;
+ 	}
+ }
