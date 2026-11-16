@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0112.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0113.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -65,7 +65,14 @@ returns, every post-release read works - and the CM3 still never executes
 adds the one cold-boot step still missing from `a6xx_gmu_fw_start()`:
 `_load_gmu_rpmh_ucode()` - the RSCC sequencer words 0x23404-0x23580 and the
 PDC tables at 0xb290000/0xb490000 (a618 variants included), behind
-`gpu_rpmh=1`.
+`gpu_rpmh=1`. log56 (0112, stub 2 + `gpu_xrel` + `gpu_rpmh`) shows the whole
+RSCC/PDC load landing (`rsc-status0` 0x1000000, match 0x4510/0x4514, seq
+0xa7a506a0, `pdc enable` 0x80000001) with the CM3 still not fetching, which
+pointed at the one write that differed from the vendor on every boot since
+0098: `CM3_BOOT_CONFIG` was written as 0, and in this tree's `kgsl_gmu.h`
+`TCM_BOOT` is 2 (`CACHED_LOAD_BOOT` 0, `CACHED_BOOT` 1), so the CM3 was being
+told to boot the cached DRAM image instead of ITCM 0. 0113 writes `TCM_BOOT`
+and prints the readback.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
