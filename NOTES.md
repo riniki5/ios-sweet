@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0113.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0114.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -72,7 +72,11 @@ pointed at the one write that differed from the vendor on every boot since
 0098: `CM3_BOOT_CONFIG` was written as 0, and in this tree's `kgsl_gmu.h`
 `TCM_BOOT` is 2 (`CACHED_LOAD_BOOT` 0, `CACHED_BOOT` 1), so the CM3 was being
 told to boot the cached DRAM image instead of ITCM 0. 0113 writes `TCM_BOOT`
-and prints the readback.
+and prints the readback. log57 then showed the boot config sticking
+(`boot-cfg 0x2 fence-range0 0x80a008a0`), the worker release completing, and
+the CM3 still not fetching, so 0114 re-roots `gmu_clk_src` on GPLL0_DIV at
+200 MHz - mainline's "known rate" for GMU bring-up, and the value the toco
+DTB's `gmu-pwrlevels` name - instead of the 19.2 MHz TCXO root.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
