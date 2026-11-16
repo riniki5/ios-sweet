@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0110.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0112.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -54,10 +54,18 @@ from the bootloader, 0xF/0xF as gpucc-sdmmagpie.c programs them) - and both
 landed in log52, but the release still wedged. log53 (0109, `gpu_stub=2
 gpu_xrel=1`) changes the picture: the SYSRESET store **returns** when a fresh
 kernel thread issues it and that thread keeps printing, while the boot thread
-never prints again after `kernel_thread_start`. 0110 therefore hands the whole
-post-release observation to the worker (2 s `FW_INIT_RESULT` poll, TCM 0x130
-sentinel, reset/cm3-cfg/busy, HFI/SPTPRAC/RPMH) and brackets
-`kernel_thread_start`/`thread_deallocate` with markers.
+never prints again after `kernel_thread_start`. log54 (0110) is the run where
+dxb silently skipped the patch (it was diffed from the 0108 tree and carried
+0109's hunks), so 0111 is the same change diffed from the real 0109 tree.
+log55 (0111, stub 2 + `gpu_xrel`) then separates the two: `kernel_thread_start`
+returns kr=0 and `thread_deallocate` returns, the worker's release store
+returns, every post-release read works - and the CM3 still never executes
+(sentinel 0, `FW_INIT_RESULT` 0 for 2 s, `FW_BUSY` 0, `CM3_CFG` 0x52,
+`SPTPRAC` 0x94). The boot thread dies in the `tsleep` after the start. 0112
+adds the one cold-boot step still missing from `a6xx_gmu_fw_start()`:
+`_load_gmu_rpmh_ucode()` - the RSCC sequencer words 0x23404-0x23580 and the
+PDC tables at 0xb290000/0xb490000 (a618 variants included), behind
+`gpu_rpmh=1`.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
