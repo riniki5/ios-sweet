@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0121.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0122.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -136,7 +136,16 @@ needed TCM at all. 0121 polls `FW_INIT_RESULT` only, gives candidate 0 log62's
 full 2000 ms window while the rest get 120 ms, leaves the ITCM read as a named
 `tcm probe ... before/after` pair at the very end (a missing `after` line is
 the proof), and replaces the boot thread's fixed wait with a worker-done flag
-(24 x 500 ms ceiling).
+(24 x 500 ms ceiling). log64 (0121) then runs the whole matrix without a TCM
+hang: all four `gpu_cc_gmu_clk_src` parents release the core with
+`fw-init=0 busy=0 cfg=0x52` for the polled window, and the first
+`CACHED_LOAD_BOOT` candidate stops the machine at the `SYSRESET=0` store - so
+the boot config is honored, the DRAM load path is what wedges, and no host
+clock source makes the CM3 run the stub. The same log shows ITCM writes working
+again once reset is re-asserted (each candidate re-plants the stub), so 0122
+reads the stub's own TCM footprint after halting: 0x130 non-zero means the core
+executed and `FW_INIT_RESULT` silence is an address-map problem, zero means it
+never ran. The two `CACHED_LOAD_BOOT` candidates are dropped.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
