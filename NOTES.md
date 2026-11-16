@@ -21,10 +21,10 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0108.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0110.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
-`gpu_norelease`, `gpu_stub`, `gpu_reboot` for the later stages).
+`gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
 Verified on device: CX/GX GDSC, GPUCC branches, PLL0 and SPTPRAC; the gfx3d
 root clock still will not leave ROOT_OFF; `a618_gmu.bin` loads, reads back and
 the preset runs, but releasing the CM3 never yields `0xBABEFACE`. Patches
@@ -41,11 +41,23 @@ required ROOT_OFF, which is clear when the mux reads 0x0). 0106 prints right
 after the SYSRESET store, fixes that gate, and adds `gpu_pwrcol=1` (vendor
 `PWR_COL_INTER_FRAME_CTRL=0x9C40400` + the six `RPMH_CTRL` enables); log48/49
 then stop as a whole machine at the release, GBIF is not halted, and 0107 adds
-`gpu_rails`/`gpu_smmu`/`gpu_norelease`. log50 never came back to USB because
-holding the CM3 in reset lets the machine reach iOS, so 0108 adds `gpu_reboot`
-(quick reboot at the end of the probe) and `gpu_stub`: a sixteen-word Thumb
-program replaces the firmware entry point, so the release can be tested with
-no firmware image, no SMMU and no buffers at all.
+`gpu_rails`/`gpu_smmu`/`gpu_norelease`. log50 (pulled after a manual power-cycle)
+shows the whole host side healthy with the CM3 held: rails voted, GMU clock
+rooted on TCXO, power_config stuck, PLL0 locked, but gfx3d still ROOT_OFF,
+SPTPRAC 0x94 timeout and SMMU sCR0 0x200626 with no context banks. log51
+(0108, `gpu_stub=1`, `gpu_reboot=1`) ends at `releasing cm3: sysreset=0`: the
+store never returns even with a two-instruction `b .` loop in TCM, so no
+firmware code runs before the wall.
+0109 fixed two host-side divergences from the vendor tree - the AHB fence range
+mask (0x802808a0 -> 0x80a008a0) and the CX_GMU CBCR WAKE/SLEEP nibbles (2/2
+from the bootloader, 0xF/0xF as gpucc-sdmmagpie.c programs them) - and both
+landed in log52, but the release still wedged. log53 (0109, `gpu_stub=2
+gpu_xrel=1`) changes the picture: the SYSRESET store **returns** when a fresh
+kernel thread issues it and that thread keeps printing, while the boot thread
+never prints again after `kernel_thread_start`. 0110 therefore hands the whole
+post-release observation to the worker (2 s `FW_INIT_RESULT` poll, TCM 0x130
+sentinel, reset/cm3-cfg/busy, HFI/SPTPRAC/RPMH) and brackets
+`kernel_thread_start`/`thread_deallocate` with markers.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
