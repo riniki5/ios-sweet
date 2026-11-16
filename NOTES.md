@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0116.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0117 + 0118.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -94,7 +94,16 @@ boot thread wait out the worker, re-asserts `CM3_SYSRESET` and writes
 `CM3_CFG = 0x4052` in that window (mainline's NMI guard, dropped in 0100 after
 log37), and prints the two words `a6xx_gmu_start()` consults first - DTCM 0xff8
 (init value 0xBABEFACE vs 0x100) and `GENERAL_7` (TCM retention) - plus
-`FW_BUSY` samples during the poll.
+`FW_BUSY` samples during the poll. log60 (0116) reads `dtcm-ff8=0 gen7=0x1
+cm3-cfg=0x52`, `reset now 0x1`, `cm3-cfg now 0x52` after the 0x4052 write, and
+`busy=0 cfg=0x52` for 1.5 s: retention is set, the init value is the right one,
+CM3_CFG bit 14 is not writable on a615, and the core is idle. The ring lost
+that tail after tick 60 because fast logging hands over to `ufslogsecs` and
+`RB_NOSYNC` dropped the rest, so 0118 pauses 2500 ms before the probe reboot.
+0117 adds the discriminator left: the GMU always-on counter (0x1f888/9) and
+the AO busy statuses (0x23b0c/d), read 100 ms apart in the worker - frozen
+means nothing in the GMU is clocked, moving means the CM3 is clocked and the
+reset never reaches the core.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
