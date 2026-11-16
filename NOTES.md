@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0123.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0124.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -151,7 +151,16 @@ candidates gone the worker finishes and the boot thread walks into the ladder,
 which reads GPUCC/GX/GMU with the core already released. 0123 stops
 `sweet_gpu_init` right after `gpu_gmu_boot_try()` when `gpu_xrel` ran and
 reboots from inside the release branch while the ring is already flushed, so a
-probe can never again leave the phone hung without a log.
+probe can never again leave the phone hung without a log. Reading log64's own
+plant lines corrects the clock verdict: candidates 1-3 print
+`sentinel=0x5eed1234` before their release, and only the stub writes 0x130, so
+the CM3 did execute on `gpll0-div200` and the clock is not what keeps the
+firmware idle. 0124 therefore trades the mux matrix for one measurement: stub 4
+writes and reads back GMU SRAM at CM3 0x43f80, writes 0xBABEFACE to the
+firmware's own 0x81714 and reads it back, keeps a stage slot before each access
+and an entry counter that grows if a fault restarts it through the vector at
+0x100, and the worker then scans `0x1a800`-`0x1fc00` for 0xBABEFACE to name the
+host word that address aliases.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
