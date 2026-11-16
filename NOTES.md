@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0115.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0116.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -83,7 +83,18 @@ machine: it selected parent 6 without first enabling that parent's GCC branch
 (`gcc_gpu_gpll0_div_clk_src`, 0x52004 bit 16, which `clk_set_rate()` would have
 enabled for it) and it ran with `gpu_cc_cx_gmu_clk` already on. 0115 enables
 the GCC branch, then programs the mux from `sweet_gpu_init()` before the GMU
-branch is enabled, the vendor's `gmu_enable_clks()` order.
+branch is enabled, the vendor's `gmu_enable_clks()` order. log59 (0115) shows
+that order working - `gpll0_div 0x1241d7b -> 0x1251d7b`, `gmu_clk_src 200 MHz
+cfg=0x602 cmd=0x2, rooted`, `src=0x2/0x602 cx-gmu=0x80004220` - and the boot
+reaching `gpu_reboot`, so the 0114 stop was the ungated parent. The CM3 still
+does not fetch (`sentinel=0`, `fw-init=0`, `FW_BUSY=0`), and the worker's
+post-store lines are missing because the boot thread rebooted 1.2 s after the
+store while the worker's poll runs 2 s (ticks 42 -> 54 in log59). 0116 has the
+boot thread wait out the worker, re-asserts `CM3_SYSRESET` and writes
+`CM3_CFG = 0x4052` in that window (mainline's NMI guard, dropped in 0100 after
+log37), and prints the two words `a6xx_gmu_start()` consults first - DTCM 0xff8
+(init value 0xBABEFACE vs 0x100) and `GENERAL_7` (TCM retention) - plus
+`FW_BUSY` samples during the poll.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
