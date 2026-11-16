@@ -1,0 +1,194 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -37,11 +37,20 @@
+  * log38 and log39 came back byte-identical to log37 - not even the 1 s flush
+  * cadence wrote anything - so the 0100 kernel stopped before the release, at
+  * the new A6XX_GBIF_HALT access. GBIF is the GPU's bus interface in the CX
+- * power domain, and this probe never actually brings CX up (the GDSC is only
+- * read, the CX rail votes time out), so touching it can hang the whole
+- * interconnect. 0101 keeps that access and the gmu_clk_src write behind
++ * power domain; the CX GDSC does come up in this probe, but the CX rail itself
++ * is never voted (only gfx.lvl is raised), so touching GBIF can still hang the
++ * whole interconnect. 0101 keeps that access and the gmu_clk_src write behind
+  * gpu_gbif=1 / gpu_gmuclk=1, and gives every post-release GMU read its own
+  * print, so the next log names the register that stalls instead of the phase.
++ * log42 showed the blind spot rather than new hardware state: the ring still
++ * held the previous gpu=0 boot's 24 minute SpringBoard log, so a kernel that
++ * dies in under a second leaves nothing saying whether it even started. 0102
++ * makes the log self-identifying (hz/10 cadence with sweetlogfast=1) and makes
++ * this bring-up print, pause, then touch the risky register, so the last
++ * durable line names the access that wedged the machine. Its write before the
++ * first sleep, though, stalled this boot at UFS init itself (log43 stops at
++ * the log banner, flush #1, 7234 B), so 0103 goes back to sleeping first and
++ * keeps only the fast cadence and the markers.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -1612,23 +1621,32 @@
+ 
+ 	PE_parse_boot_argn("gpu_gbif", &gbif, sizeof(gbif));
+ 	PE_parse_boot_argn("gpu_gmuclk", &clk, sizeof(clk));
+-	printf("SWEET GPU: prestart gbif=%d gmu_clk_src=%#x/%#x\n",
+-	    gbif, gpu_rd(gpu_cc, GPUCC_GMU_RCG),
+-	    gpu_rd(gpu_cc, GPUCC_GMU_RCG_CFG));
++	/* Print, pause, read, print, pause: with sweetlogfast=1 the pause is
++	 * longer than the flush interval, so a marker survives a hang in the
++	 * access that follows it and the log names the fatal register. */
++	printf("SWEET GPU: prestart begin gbif=%d\n", gbif);
++	delay(250);
++	uint32_t rcg = gpu_rd(gpu_cc, GPUCC_GMU_RCG);
++	uint32_t cfg = gpu_rd(gpu_cc, GPUCC_GMU_RCG_CFG);
++
++	printf("SWEET GPU: prestart gmu_clk_src=%#x/%#x\n", rcg, cfg);
++	delay(250);
+ 	if (gbif) {
+ 		uint32_t halt = gpu_rd(gpu_core, GBIF_HALT);
+ 
+ 		printf("SWEET GPU: gbif halt=%#x ack=%#x\n",
+ 		    halt, gpu_rd(gpu_core, GBIF_HALT_ACK));
++		delay(250);
+ 		if (halt != 0) {
+ 			gpu_wr(gpu_core, GBIF_HALT, 0);
+ 			delay(1);
+ 			printf("SWEET GPU: gbif halt now %#x ack=%#x\n",
+ 			    gpu_rd(gpu_core, GBIF_HALT),
+ 			    gpu_rd(gpu_core, GBIF_HALT_ACK));
++			delay(250);
+ 		}
+ 	}
+-	if (clk && (gpu_rd(gpu_cc, GPUCC_GMU_RCG) & RCG_ROOT_OFF)) {
++	if (clk && (rcg & RCG_ROOT_OFF)) {
+ 		gpu_wr(gpu_cc, GPUCC_GMU_RCG_CFG, RCG_CFG_XO);
+ 		gpu_wr(gpu_cc, GPUCC_GMU_RCG, RCG_UPDATE);
+ 		delay(1);
+@@ -1677,6 +1695,7 @@
+ 	gpu_gmu_prestart();
+ 	printf("SWEET GPU: gmu preset done, cm3-cfg=%#x sfr=%#x, releasing cm3\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_CFG), gpu_rd(gpu_gmu, GMU_HFI_SFR_ADDR));
++	delay(250);
+ 	gpu_wr(gpu_gmu, GMU_CX_GMU_WFI_CONFIG, 0);
+ 	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
+ 	/*
+@@ -1686,15 +1705,19 @@
+ 	 */
+ 	delay(20);
+ 	printf("SWEET GPU: cm3 released 20 ms ago, no gmu read yet\n");
++	delay(250);
+ 	printf("SWEET GPU: post-release rbbm=%#x\n", gpu_core_rev());
+-	/* One print per access: whichever line is last names the stuck one. */
+-	printf("SWEET GPU: post-release reading fw-init\n");
++	/* One marker per access: whichever line is last names the stuck one. */
++	printf("SWEET GPU: reading fw-init\n");
++	delay(250);
+ 	uint32_t init = gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT);
+ 	printf("SWEET GPU: post-release fw-init=%#x\n", init);
+-	printf("SWEET GPU: post-release reading busy\n");
++	printf("SWEET GPU: reading busy\n");
++	delay(250);
+ 	printf("SWEET GPU: post-release busy=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_FW_BUSY));
+-	printf("SWEET GPU: post-release reading reset\n");
++	printf("SWEET GPU: reading reset\n");
++	delay(250);
+ 	printf("SWEET GPU: post-release reset=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
+ 	unsigned i;
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -677,10 +677,10 @@
+  *   | u64 flush sequence
+  * ring offset of byte n = n % ring size. Read it from a recovery with
+  * tools/sweet-log-pull.sh. Disabled with boot-arg sweetlog=0.
+- * The thread writes once before its first sleep and then every ufslogsecs
+- * (default 10) seconds, or every hz/10 ticks with sweetlogfast=1; that
+- * cadence is what lets a boot that hangs cleanly in the middle of driver
+- * bring-up still leave its last steps on disk.
++ * The thread flushes every ufslogsecs (default 10) seconds, or every hz/10
++ * ticks with sweetlogfast=1. The first write stays behind that first sleep:
++ * writing before it stalled the boot at UFS init (log43), so a boot that dies
++ * inside the first 100 ms still leaves the previous ring untouched.
+  */
+ #define SWEET_LOG_SIZE          (4u << 20)
+ #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
+@@ -753,46 +753,44 @@
+ 
+ 	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx),"
+ 	    " flush every %d ticks\n", SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base, wait);
+-	/* Write before the first sleep: a boot that dies early still leaves a
+-	 * header with its own seq/total, which tells the two apart from a stale
+-	 * ring written by the previous boot. */
+ 	for (;;) {
++		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", wait);
+ 		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
+-		if (total != flushed) {
+-			uint64_t pos = total - flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : flushed;
+-			int error = 0;
+-
+-			lck_mtx_lock(&sweet_ufs_lock);
+-			while (pos < total && !error) {
+-				uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
+-				uint32_t blk = off / UFS_BLOCK;
+-				uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
+-				uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
+-				    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
+-				memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
+-				error = ufs_write_blocks(base + 1 + blk, n);
+-				pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
+-			}
+-			if (!error) {
+-				struct sweet_log_header h = {
+-					.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
+-					.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = ++seq,
+-				};
+-				bzero(bounce, UFS_BLOCK);
+-				memcpy(bounce, &h, sizeof(h));
+-				error = ufs_write_blocks(base, 1);
+-			}
+-			if (!error) {
+-				error = ufs_sync_cache();
+-			}
+-			lck_mtx_unlock(&sweet_ufs_lock);
+-			if (error) {
+-				printf("SWEET LOG: write failed (%d), stopping\n", error);
+-				return;
+-			}
+-			flushed = total;
++		if (total == flushed) {
++			continue;
+ 		}
+-		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", wait);
++		uint64_t pos = total - flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : flushed;
++		int error = 0;
++
++		lck_mtx_lock(&sweet_ufs_lock);
++		while (pos < total && !error) {
++			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
++			uint32_t blk = off / UFS_BLOCK;
++			uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
++			uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
++			    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
++			memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
++			error = ufs_write_blocks(base + 1 + blk, n);
++			pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
++		}
++		if (!error) {
++			struct sweet_log_header h = {
++				.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
++				.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = ++seq,
++			};
++			bzero(bounce, UFS_BLOCK);
++			memcpy(bounce, &h, sizeof(h));
++			error = ufs_write_blocks(base, 1);
++		}
++		if (!error) {
++			error = ufs_sync_cache();
++		}
++		lck_mtx_unlock(&sweet_ufs_lock);
++		if (error) {
++			printf("SWEET LOG: write failed (%d), stopping\n", error);
++			return;
++		}
++		flushed = total;
+ 	}
+ }
+ 
