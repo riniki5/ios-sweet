@@ -21,7 +21,7 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
-**GPU (Adreno 618/a615) under test: 0124.** The bring-up lives in
+**GPU (Adreno 618/a615) under test: 0126.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
 `gpu_norelease`, `gpu_stub`, `gpu_reboot`, `gpu_xrel` for the later stages).
@@ -160,7 +160,30 @@ writes and reads back GMU SRAM at CM3 0x43f80, writes 0xBABEFACE to the
 firmware's own 0x81714 and reads it back, keeps a stage slot before each access
 and an entry counter that grows if a fault restarts it through the vector at
 0x100, and the worker then scans `0x1a800`-`0x1fc00` for 0xBABEFACE to name the
-host word that address aliases.
+host word that address aliases. log65/66 (0124) show `ran=0x5eed0004`,
+`stage=5`, `entry=1`, `sram=0xbabeface` (GMU SRAM is reachable) but `reg=0` and
+no scan hit; both boots died inside the scan. 0125 made the question
+bidirectional with stub 6: the host plants `0x12345678` in `FW_INIT_RESULT`,
+the stub reads CM3 0x81714/0x81718/0x81720 and writes 0xBABEFACE to 0x81714.
+log67 then reads `180=0x5eed0006 184=0 188=0 18c=0 190=0x5 198=0x1
+fw-init=0x12345678`: every access completed, the CM3 sees none of the host's
+`FW_INIT_RESULT`, and its 0x81714 write never appears - so 0x81714 is not
+`FW_INIT_RESULT` and the two views are not a plain passthrough. Enumerating the
+firmware's own literals settles the map: **the CM3 sees the GMU register block
+rebased, `CM3 = 4 * host_word + 0x3000`** (host 0x1F400 <-> CM3 0x80000), proven
+on `HFI_QTBL_ADDR`/`HFI_CTRL_STATUS`, the AO counter, `RPMH_POWER_STATE`,
+`BOOT_KMD_LM_HANDSHAKE` and a dozen others. Under that rule host
+`CM3_FW_INIT_RESULT` 0x1F81C is CM3 0x81070, and the firmware's 0x81714 is host
+`A6XX_GMU_GENERAL_0` 0x1F9C5 - a scratch word it clears at init, which is the
+0xBABEFACE store 0108 mistook for the init signal. 0126 (stub 7) tests the
+rebased window end to end: the host plants 0xCAFEF00D in `FW_INIT_RESULT` and
+0x12345678 in `GENERAL_0` while halted, the stub reads CM3 0x81714 (= host
+GENERAL_0), 0x81070 (pre-write FW_INIT) and 0x81600 (`HFI_CTRL_STATUS` as a
+control), then writes 0xBABEFACE to 0x81070 and reads it back; the worker prints
+all six words plus the host-side value. Matching reads prove passthrough; a host
+`FW_INIT_RESULT` of 0xBABEFACE after the stub's write means the real firmware's
+silence is its own problem, not the address map. The scan is dropped - both
+boots that ran it lost their tails (log67 hangs inside the 0x1f800 chunk).
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
