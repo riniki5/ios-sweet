@@ -184,6 +184,16 @@ all six words plus the host-side value. Matching reads prove passthrough; a host
 `FW_INIT_RESULT` of 0xBABEFACE after the stub's write means the real firmware's
 silence is its own problem, not the address map. The scan is dropped - both
 boots that ran it lost their tails (log67 hangs inside the 0x1f800 chunk).
+log68 (0126, stub 7) answers both ways: `clktry 0 plant fw-init=0xcafef00d
+gen0=0x12345678` and `stub7 tcm ... 184=0x12345678 188=0xcafef00d ... 190=0x6
+198=0x1 fw-init=0xbabeface`, i.e. the CM3 read both host plants through its
+rebased window, its own 0xBABEFACE store to 0x81070 landed on the host as
+`CM3_FW_INIT_RESULT`, every staged access completed without a fault (stage 6),
+and `xrel reboot after release window t=43839` ended the probe cleanly. The
+window is a full bidirectional passthrough, so the real firmware's silence is
+inside the firmware image (its own fault handling, boot-status word or DRAM/
+DTCM expectations), not the address map. Next on that track: capture the CM3's
+fault/boot status rather than probing more registers.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
