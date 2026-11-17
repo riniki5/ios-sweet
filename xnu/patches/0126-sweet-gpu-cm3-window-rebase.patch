@@ -1,0 +1,164 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -299,6 +299,8 @@
+ #define GMU_HFI_SFR_ADDR        GMU_REG(0x1f982u)
+ #define GMU_HFI_QTBL_INFO       GMU_REG(0x1f984u)
+ #define GMU_HFI_QTBL_ADDR       GMU_REG(0x1f985u)
++#define GMU_HFI_CTRL_STATUS     GMU_REG(0x1f980u)
++#define GMU_GENERAL_0           GMU_REG(0x1f9c5u)
+ #define GMU_GENERAL_7           GMU_REG(0x1f9ccu)
+ #define GMU_PWR_COL_CP_MSG      GMU_REG(0x1f900u)
+ #define GMU_AHB_FENCE_RANGE_0   GMU_REG(0x23b11u)
+@@ -2059,6 +2061,27 @@
+  * anything else means the firmware's address is not the APSS register. The
+  * scan also lost 0x1ac00: log66's walk proved that word hangs the AHB, so only
+  * the windows log62-66 have read from are scanned now.
++ *
++ * 0126: log67 ran stub 6 and killed the alias outright. The host planted
++ * 0x12345678 in FW_INIT_RESULT and read it back, while the CM3 - stage 5, entry
++ * 1, so all three reads completed - read 0 at 0x81714, and its 0xBABEFACE store
++ * never appeared on the host. The reason is that the CM3 does not see
++ * FW_INIT_RESULT at 0x81714 at all. The firmware's own literals pin its window
++ * to 4 * host word + 0x3000: 0x81614 is HFI_QTBL_ADDR 0x1F985 (the register the
++ * host fills with the queue-table address the firmware must read), 0x81600 is
++ * HFI_CTRL_STATUS 0x1F980, 0x81220 is the AO counter 0x1F888, 0x813b0 is
++ * RPMH_POWER_STATE 0x1F8EC, 0x81304/0x8130c are the PWR/COL hyst and keepalive
++ * registers, and 0x81714/0x8171c/0x81724 land on GENERAL_0/2/4 whose seven-word
++ * block the image clears at init. So host FW_INIT_RESULT 0x1F81C is CM3
++ * 0x81070, and 0x81714 - the address 0108 took from the image's 0xBABEFACE
++ * store - is GENERAL_0 0x1F9C5, a scratch register. Stub 7 plants a different
++ * sentinel in each register while the core is halted, reads both back from the
++ * CM3 plus HFI_CTRL_STATUS as a control, then writes 0xBABEFACE to 0x81070 and
++ * reads it back. Matching reads prove the window is passthrough; if the host
++ * word then reads 0xBABEFACE the write path works and the real firmware's
++ * silence is its own problem, not an address-map one. The register scan is
++ * gone: log67's walk hung the AHB inside the 0x1f800 chunk, so every scan so
++ * far has cost the boot its tail and no scan has ever completed.
+  */
+ static const struct gpu_clk_try {
+ 	uint32_t cfg;
+@@ -2147,10 +2170,14 @@
+ 	for (unsigned a = 0; a < sizeof(gpu_clk_try) / sizeof(gpu_clk_try[0]); ++a) {
+ 		uint32_t cbcr = gpu_rd(gpu_cc, GPUCC_CX_GMU_CBCR);
+ 		uint32_t init = 0;
+-		/* 0125: stub 6 reads CM3 0x81714 before it writes anything, so plant a
+-		 * value only stub 6 can see there and it comes back at host ITCM 0x184
+-		 * if - and only if - CM3 0x81714 aliases this host word. */
+-		uint32_t plant = (stub >= 6) ? 0x12345678u : 0;
++		/* 0125/0126: the stub reads these before it writes anything, so a plant
++		 * comes back at host ITCM 0x184/0x188 if - and only if - the CM3's
++		 * address is the same register. 0126 uses two different values because
++		 * it checks two addresses: host FW_INIT_RESULT 0x1F81C is CM3 0x81070,
++		 * host GENERAL_0 0x1F9C5 is CM3 0x81714. */
++		uint32_t plant = (stub >= 7) ? 0xcafef00du :
++		    (stub >= 6) ? 0x12345678u : 0;
++		uint32_t gen0_plant = (stub >= 7) ? 0x12345678u : 0;
+ 
+ 		if (a > 0) {
+ 			/* 0114 died reprogramming this mux with the branch live, so
+@@ -2171,9 +2198,11 @@
+ 		gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 1);
+ 		gpu_wr(gpu_gmu, GMU_CM3_CFG, 0x4052);
+ 		gpu_wr(gpu_gmu, GMU_CM3_FW_INIT_RESULT, plant);
++		gpu_wr(gpu_gmu, GMU_GENERAL_0, gen0_plant);
+ 		delay(10);
+-		printf("SWEET GPU: clktry %u plant fw-init=%#x\n", a,
+-		    gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT));
++		printf("SWEET GPU: clktry %u plant fw-init=%#x gen0=%#x\n", a,
++		    gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT),
++		    gpu_rd(gpu_gmu, GMU_GENERAL_0));
+ 		(void)sweet_log_sync();
+ 		if (stub) {
+ 			/* Stub 4's result block is host memory from the CM3's side, so
+@@ -2215,22 +2244,26 @@
+ 		(void)sweet_log_sync();
+ 		gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 1);
+ 		/* With the core halted again TCM answers (log64 replanted the stub
+-		 * every candidate), so this is the stub's own footprint. Both stubs keep
+-		 * their verdict in a block at 0x180: ran marker, then stub 4's SRAM
+-		 * readback / register-window readback / stage / entry count, or stub 6's
+-		 * reads of CM3 0x81714 / 0x81718 / 0x81720 plus stage and entry count.
+-		 * stage names the access the stub is in and entry > 1 means an access
+-		 * faulted and the vector at 0x100 restarted the program. */
++		 * every candidate), so this is the stub's own footprint. Every stub keeps
++		 * its verdict in a block at 0x180: ran marker, then stub 4's SRAM and
++		 * register-window readbacks, stub 6's reads of CM3 0x81714/18/20, or stub
++		 * 7's reads of GENERAL_0 / FW_INIT / HFI_CTRL_STATUS, its own FW_INIT
++		 * write (0x194) plus stage and entry count. stage names the access the
++		 * stub is in and entry > 1 means an access faulted and the vector at
++		 * 0x100 restarted the program. gen0 is the host's own view of GENERAL_0,
++		 * which the CM3 sees as 0x81714. */
+ 		if (stub >= 4) {
+-			printf("SWEET GPU: stub%d tcm 180=%#x 184=%#x 188=%#x 18c=%#x 190=%#x 198=%#x fw-init=%#x halt=%#x\n",
++			printf("SWEET GPU: stub%d tcm 180=%#x 184=%#x 188=%#x 18c=%#x 190=%#x 194=%#x 198=%#x fw-init=%#x gen0=%#x halt=%#x\n",
+ 			    stub,
+ 			    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x180),
+ 			    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x184),
+ 			    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x188),
+ 			    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x18c),
+ 			    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x190),
++			    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x194),
+ 			    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x198),
+ 			    gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT),
++			    gpu_rd(gpu_gmu, GMU_GENERAL_0),
+ 			    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
+ 		} else {
+ 			printf("SWEET GPU: clktry %u %s stub-tcm 0x130=%#x 0x124=%#x halt=%#x\n",
+@@ -2245,7 +2278,11 @@
+ 			break;
+ 		}
+ 	}
+-	if (stub >= 4) {
++	/* The scan walks register words one at a time and two boots now show that
++	 * some of them hang the AHB (0x1ac00 in log66, somewhere in the 0x1f800
++	 * chunk in log67) - it costs the tail of the boot every time it runs.
++	 * Stub 7 answers the mapping from named registers instead. */
++	if (stub >= 4 && stub < 7) {
+ 		gpu_gmu_scan_stub();
+ 	}
+ 	printf("SWEET GPU: clktry done best sentinel=%#x fw-init=%#x\n",
+@@ -2337,6 +2374,33 @@
+ 	0x20bef6cbu, 0x20056038u, 0xe7fe6130u,
+ };
+ 
++/*
++ * Stub 7: the CM3 sees the GMU register block at 0x80000 with the same layout
++ * the host has from 0x1F400, i.e. CM3 = 4 * host_word + 0x3000 (the firmware's
++ * own literals prove it: 0x81614 is HFI_QTBL_ADDR 0x1F985, 0x81600 is
++ * HFI_CTRL_STATUS 0x1F980, 0x81220 is the AO counter 0x1F888). So host
++ * FW_INIT_RESULT 0x1F81C is CM3 0x81070, and the firmware's 0x81714 - the
++ * value 0108 took for the init result - is GENERAL_0 0x1F9C5.
++ *
++ * The host plants a different sentinel in each while the core is halted; the
++ * stub reads both back, reads HFI_CTRL_STATUS as a control, then writes
++ * 0xBABEFACE to CM3 0x81070 and reads it back. Result block: ran, GENERAL_0
++ * read (0x184), FW_INIT read before the write (0x188), HFI_CTRL_STATUS read
++ * (0x18c), stage (0x190), FW_INIT read back after the write (0x194), entry
++ * (0x198). If both plants come back, the window is passthrough and the write
++ * should replace the host's plant - which makes the real firmware's silence a
++ * firmware problem, not an address problem.
++ */
++static const uint32_t gpu_stub7[] = {
++	0x1680f240u, 0x1c4069b0u, 0x280161b0u, 0xf240d104u,
++	0xf6c50007u, 0x603060edu, 0x61302001u, 0x7714f241u,
++	0x0708f2c0u, 0x60716839u, 0x61302002u, 0x0770f241u,
++	0x0708f2c0u, 0x60b16839u, 0x61302003u, 0x6700f241u,
++	0x0708f2c0u, 0x60f16839u, 0x61302004u, 0x0770f241u,
++	0x0708f2c0u, 0x20cef64fu, 0x20bef6cbu, 0x20056038u,
++	0x68386130u, 0x20066170u, 0xe7fe6130u,
++};
++
+ static void
+ gpu_gmu_stub(int mode)
+ {
+@@ -2347,6 +2411,10 @@
+ 	}
+ 	if (mode == 1) {
+ 		gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x100, 0xe7fee7feu);
++	} else if (mode >= 7) {
++		for (i = 0; i < sizeof(gpu_stub7) / sizeof(gpu_stub7[0]); ++i) {
++			gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x100 + i * 4, gpu_stub7[i]);
++		}
+ 	} else if (mode >= 6) {
+ 		for (i = 0; i < sizeof(gpu_stub6) / sizeof(gpu_stub6[0]); ++i) {
+ 			gpu_wr(gpu_gmu, GMU_CM3_ITCM + 0x100 + i * 4, gpu_stub6[i]);
