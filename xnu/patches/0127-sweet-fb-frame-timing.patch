@@ -1,0 +1,70 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -124,6 +124,14 @@
+ 	/* Why a present drew nothing: mask, zero id, missing surface, the panel
+ 	 * surface itself, or a surface that fails the bounds checks. */
+ 	uint64_t      fSkip[5];
++	/* 0127: where a frame's time goes. present() runs in the vsync callback,
++	 * so its duration delays the next notification; vsync-gap-max is the
++	 * worst interval between callbacks. Reported and reset every 300 ticks. */
++	uint64_t      fPresentNSum;
++	uint64_t      fPresentNMax;
++	uint64_t      fPresentNWindow;
++	uint64_t      fVsyncGapMax;
++	uint64_t      fVsyncLast;
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -240,6 +248,15 @@
+ 		0, 0,
+ 	};
+ 
++	if (fb->fVsyncLast != 0 && now > fb->fVsyncLast) {
++		uint64_t ns;
++		absolutetime_to_nanoseconds(now - fb->fVsyncLast, &ns);
++		if (ns > fb->fVsyncGapMax) {
++			fb->fVsyncGapMax = ns;
++		}
++	}
++	fb->fVsyncLast = now;
++
+ 	IOLockLock(fb->fLock);
+ 	for (unsigned int i = 0; i < fb->fClients->getCount(); i++) {
+ 		IOMobileFramebufferUserClient *client =
+@@ -248,10 +265,16 @@
+ 	}
+ 	if ((count % 300u) == 0) {
+ 		/* Five seconds at 60 Hz: is the timer running and are frames arriving? */
+-		IOLog("SWEET FB: vsync %llu swaps %llu presents %llu dirty %d off %d ticks %u skip mask/id/nosurf/self/bounds %llu/%llu/%llu/%llu/%llu\n",
++		uint64_t avg = fb->fPresentNWindow ? fb->fPresentNSum / fb->fPresentNWindow / 1000 : 0;
++		IOLog("SWEET FB: vsync %llu swaps %llu presents %llu dirty %d off %d ticks %u skip mask/id/nosurf/self/bounds %llu/%llu/%llu/%llu/%llu present-us avg %llu max %llu n %llu vsync-gap-max-us %llu\n",
+ 		    count, fb->fSwapCount, fb->fPresentCount, fb->fDirty, fb->fPowerOff,
+ 		    fb->fFlushTicks, fb->fSkip[0], fb->fSkip[1], fb->fSkip[2],
+-		    fb->fSkip[3], fb->fSkip[4]);
++		    fb->fSkip[3], fb->fSkip[4],
++		    avg, fb->fPresentNMax / 1000, fb->fPresentNWindow, fb->fVsyncGapMax / 1000);
++		fb->fPresentNSum = 0;
++		fb->fPresentNMax = 0;
++		fb->fPresentNWindow = 0;
++		fb->fVsyncGapMax = 0;
+ 	}
+ 	if (fb->fPowerOff) {
+ 		/* The panel scans out of fPixels while we write, so a multi-step
+@@ -277,7 +300,17 @@
+ 	}
+ 	IOLockUnlock(fb->fLock);
+ 	if (rec != NULL) {
++		uint64_t p0 = mach_absolute_time();
+ 		fb->present(rec);
++		uint64_t ns;
++		absolutetime_to_nanoseconds(mach_absolute_time() - p0, &ns);
++		IOLockLock(fb->fLock);
++		fb->fPresentNSum += ns;
++		fb->fPresentNWindow++;
++		if (ns > fb->fPresentNMax) {
++			fb->fPresentNMax = ns;
++		}
++		IOLockUnlock(fb->fLock);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
