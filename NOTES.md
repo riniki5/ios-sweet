@@ -21,6 +21,20 @@ move with a finger, `13/23/33` events and rising enter/motion/leave counters.
 The protocol path (FTI, IER 0x41 readback 0x40, sense/gesture order) was right
 all along.
 
+**UI smoothness (CPU path), 0127-0129.** 0127 (run 44157950965) adds frame
+timing to `SweetFramebuffer.cpp`: vsync-gap max and per-present duration,
+reported every 300 ticks. log71 (828x1792): present avg 10.2-10.9 ms
+(max 21.3), vsync-gap-max 39.0 ms, frame ~64 ms, CA/backboardd ~53 ms;
+log72 (750x1334): present unchanged at 9.6-12.0 ms - the fixed 10.1 MB panel
+write dominates, not the source read - peak window 18.6 fps vs 15.6. Fit:
+CA ~20.3 ms fixed + 0.0221 ms/Kpx. 60 fps therefore needs the GPU.
+0128 (run 44173416934, `shim-ui-0128.img`) gathers a stretched scanline in
+cached memory and does one memcpy per row into the write-combining panel.
+0129 (run 44176706978, `shim-ui-0129.img`) moves present() onto a
+`thread_call_allocate` worker so the 10 ms copy no longer runs inside the
+vsync timer (the 39 ms gaps); the timer only queues the latest swap. Both
+build trees verified byte-identical to `work-toco/SweetFramebuffer-012{8,9}.cpp`.
+
 **GPU (Adreno 618/a615) under test: 0126.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
