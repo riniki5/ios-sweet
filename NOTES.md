@@ -345,6 +345,21 @@ sGFSR/GFSYNR0/GFSYNR1/GFSYNR2 on both sides of the handshake, so the next log
 either shows the handshake completing or names the stream that faulted.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
+0138 booted (log81) and settled the SMMU question the other way: at boot
+`scr0=0x200626` (USFCFG **set**, CLIENTPD clear) with all five SMRs invalid,
+`gpu_smmu_bypass`'s USFCFG clear read back 0x200626 unchanged, and the SID-5
+write pair read back `smr0=0x80000005` but `s2cr0=0x20000` (FAULT) after
+writing BYPASS. So either S2CR and sCR0 ignore EL1 stores or they only take
+one once the SMR is valid - and in both 0137 and 0138 stream 5 ended up
+faulting. HFI_CTRL_INIT then wedged exactly as before. 0139 writes the pair
+valid-first, tries sCR0 with USFCFG clear and then with the reference's final
+value (`GFRE|GCFGFRE|VMIDPNE|PTM`, FB off), drops the SMR again if BYPASS still
+does not read back, prints the whole SMR/S2CR inventory, and splits the HFI
+store from the status read with log syncs plus an AO-counter/fence read so a
+hang lands on one side of the store. It also writes Linux's non-a7xx AHB fence
+range `0x802800a0`; 0109-0138 wrote `0x80a008a0` (upper field shifted by two,
+lower 0x8a0).
+
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
 the patch applied: 0103 had been diffed from the 0101 tree, dxb's patch step
 skipped it whole, and the "0103" kernel behaved exactly like 0102. Every new

@@ -1,0 +1,174 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -333,10 +333,13 @@
+ #define GMU_MX_VOTE_TOP         4u
+ #define GMU_PWR_COL_CP_MSG      GMU_REG(0x1f900u)
+ #define GMU_AHB_FENCE_RANGE_0   GMU_REG(0x23b11u)
+-/* adreno_a6xx_gmu.c GMU_FENCE_RANGE_MASK. 0109: 0108 and earlier wrote
+- * 0x802808a0, which puts the (0xA << 2) field at bit 16 instead of bit 18. */
+-#define GMU_FENCE_RANGE_MASK	\
+-	((0x1u << 31) | (((0xAu << 2)) << 18) | 0x8a0u)
++/*
++ * a6xx_gmu_fw_start, the non-a7xx/a8xx path: upper range 0xa in bits 29:18 and
++ * lower range 0xa0. 0108 wrote 0x802808a0 (upper right, lower 0x8a0); 0109
++ * through 0138 moved the upper field two bits left instead (0x80a008a0). The
++ * reference's A618 on hardware uses this value.
++ */
++#define GMU_FENCE_RANGE_MASK	((0x1u << 31) | (0xAu << 18) | 0xa0u)
+ #define GMU_SPTPRAC_PWR_STATUS  GMU_REG(0x1f8d0u)
+ /* a6xx_gmu_read_ao_counter(): the GMU's always-on clock counter. Two reads a
+  * fixed interval apart say whether anything inside the GMU is clocked at all,
+@@ -450,7 +453,15 @@
+ #define SMMU_GR0_SMR            0x800u
+ #define SMMU_GR0_S2CR           0xc00u
+ #define SMMU_SCR0_CLIENTPD      (1u << 0)
++#define SMMU_SCR0_GFRE          (1u << 1)
++#define SMMU_SCR0_GCFGFRE       (1u << 4)
+ #define SMMU_SCR0_USFCFG        (1u << 10)
++#define SMMU_SCR0_VMIDPNE       (1u << 11)
++#define SMMU_SCR0_PTM           (1u << 12)
++#define SMMU_SCR0_FB            (1u << 13)
++/* arm-smmu.c arm_smmu_device_reset's final sCR0 state on this class of SMMU. */
++#define SMMU_SCR0_ENABLE_BITS   (SMMU_SCR0_GFRE | SMMU_SCR0_GCFGFRE | \
++	                           SMMU_SCR0_VMIDPNE | SMMU_SCR0_PTM)
+ #define SMMU_SMR_VALID          (1u << 31)
+ #define SMMU_S2CR_TYPE          (3u << 16)
+ #define SMMU_S2CR_BYPASS        (1u << 16)
+@@ -2893,49 +2904,83 @@
+ 
+ /*
+  * The GMU's own kernel DMA - HFI queues, firmware log - is stream 5 of the
+- * GPU SMMU (live DT: qcom,gmu's gmu_kernel child, iommus = <&smmu 5>). No SMR
+- * matches it at boot and SMMU_GBPA is 0, so an unmatched transaction is
+- * terminated rather than bypassed; give the stream a bypass entry of its own
+- * so HFI does not depend on that policy.
++ * GPU SMMU (live DT: qcom,gmu's gmu_kernel child, iommus = <&smmu 5>). The
++ * boot chain leaves the client port enabled with sCR0.USFCFG set and every SMR
++ * invalid, so an unmatched stream is terminated rather than bypassed.
++ *
++ * 0138 installed a SID-5 SMR before its S2CR, read the SMR back and got the
++ * S2CR still reporting FAULT. The reference orders the pair valid-first and
++ * finishes with USFCFG clear, so 0139 tries that, then falls back to leaving
++ * the stream unmatched under a cleared USFCFG. Each write prints its readback:
++ * one boot says which of these registers this SMMU lets EL1 change.
+  */
+ static void
+ gpu_smmu_gmu_stream(void)
+ {
+ 	unsigned groups, n;
+-	uint32_t smr, s2cr;
++	uint32_t scr0, final, smr, before, after;
+ 
+ 	if (!gpu_smmu) {
++		printf("SWEET GPU: smmu not mapped, gmu stream left alone\n");
+ 		return;
+ 	}
++	scr0 = gpu_rd(gpu_smmu, SMMU_GR0_SCR0);
++	printf("SWEET GPU: smmu state scr0=%#x acr=%#x gbpa=%#x sgfsr=%#x"
++	    " idr0=%#x idr1=%#x\n", scr0, gpu_rd(gpu_smmu, 0x10),
++	    gpu_rd(gpu_smmu, SMMU_GR0_GBPA), gpu_rd(gpu_smmu, SMMU_GR0_SGFSR),
++	    gpu_rd(gpu_smmu, SMMU_GR0_IDR0), gpu_rd(gpu_smmu, SMMU_GR0_IDR1));
+ 	groups = gpu_rd(gpu_smmu, SMMU_GR0_IDR0) & 0xffu;
+ 	if (groups > 64) {
+ 		groups = 64;
+ 	}
+ 	for (n = 0; n < groups; ++n) {
+-		smr = gpu_rd(gpu_smmu, SMMU_GR0_SMR + 4 * n);
+-		if (!(smr & SMMU_SMR_VALID)) {
+-			break;
+-		}
+-		if ((smr & 0xffffu) == GMU_GMU_SID) {
+-			s2cr = gpu_rd(gpu_smmu, SMMU_GR0_S2CR + 4 * n);
+-			printf("SWEET GPU: smmu gmu sid %u already smr%u=%#x s2cr=%#x\n",
+-			    GMU_GMU_SID, n, smr, s2cr);
+-			return;
+-		}
++		printf("SWEET GPU: smmu g%u smr=%#x s2cr=%#x\n", n,
++		    gpu_rd(gpu_smmu, SMMU_GR0_SMR + 4 * n),
++		    gpu_rd(gpu_smmu, SMMU_GR0_S2CR + 4 * n));
+ 	}
+-	if (n == groups) {
+-		printf("SWEET GPU: smmu gmu sid %u: no free SMR\n", GMU_GMU_SID);
+-		return;
+-	}
+-	/* Program the entry before it can match, so the first GMU transaction
+-	 * already sees BYPASS instead of the reset S2CR's fault type. */
+-	gpu_wr(gpu_smmu, SMMU_GR0_S2CR + 4 * n, SMMU_S2CR_BYPASS);
+-	gpu_wr(gpu_smmu, SMMU_GR0_SMR + 4 * n,
+-	    SMMU_SMR_VALID | (GMU_GMU_SID & 0xffffu));
+-	printf("SWEET GPU: smmu gmu sid %u smr%u=%#x s2cr=%#x scr0=%#x gbpa=%#x\n",
+-	    GMU_GMU_SID, n, gpu_rd(gpu_smmu, SMMU_GR0_SMR + 4 * n),
+-	    gpu_rd(gpu_smmu, SMMU_GR0_S2CR + 4 * n),
+-	    gpu_rd(gpu_smmu, SMMU_GR0_SCR0), gpu_rd(gpu_smmu, SMMU_GR0_GBPA));
++	/* Does an sCR0 write land at all? Clear USFCFG, then try the reference's
++	 * final state, which also turns FB off and the fault reports on. */
++	if (scr0 & SMMU_SCR0_USFCFG) {
++		gpu_wr(gpu_smmu, SMMU_GR0_SCR0, scr0 & ~SMMU_SCR0_USFCFG);
++		after = gpu_rd(gpu_smmu, SMMU_GR0_SCR0);
++		printf("SWEET GPU: smmu scr0 %#x: usfcfg clear wrote %#x read %#x\n",
++		    scr0, scr0 & ~SMMU_SCR0_USFCFG, after);
++		if (after & SMMU_SCR0_USFCFG) {
++			gpu_wr(gpu_smmu, SMMU_GR0_SCR0,
++			    (scr0 & ~(SMMU_SCR0_CLIENTPD | SMMU_SCR0_USFCFG |
++			    SMMU_SCR0_FB)) | SMMU_SCR0_ENABLE_BITS);
++			printf("SWEET GPU: smmu scr0 reference wrote %#x read %#x\n",
++			    (scr0 & ~(SMMU_SCR0_CLIENTPD | SMMU_SCR0_USFCFG |
++			    SMMU_SCR0_FB)) | SMMU_SCR0_ENABLE_BITS,
++			    gpu_rd(gpu_smmu, SMMU_GR0_SCR0));
++		}
++	}
++	/* VALID first, then the type; 0138 did the opposite. */
++	smr = gpu_rd(gpu_smmu, SMMU_GR0_SMR);
++	if (!(smr & SMMU_SMR_VALID) || (smr & 0xffffu) != GMU_GMU_SID) {
++		gpu_wr(gpu_smmu, SMMU_GR0_SMR,
++		    SMMU_SMR_VALID | (GMU_GMU_SID & 0xffffu));
++		printf("SWEET GPU: smmu smr0 wrote %#x read %#x\n",
++		    SMMU_SMR_VALID | (GMU_GMU_SID & 0xffffu),
++		    gpu_rd(gpu_smmu, SMMU_GR0_SMR));
++		before = gpu_rd(gpu_smmu, SMMU_GR0_S2CR);
++		gpu_wr(gpu_smmu, SMMU_GR0_S2CR, SMMU_S2CR_BYPASS);
++		after = gpu_rd(gpu_smmu, SMMU_GR0_S2CR);
++		printf("SWEET GPU: smmu s2cr0 %#x -> wrote %#x read %#x\n",
++		    before, SMMU_S2CR_BYPASS, after);
++		if ((after & SMMU_S2CR_TYPE) != SMMU_S2CR_BYPASS) {
++			/* Do not leave the stream matched to FAULT. */
++			gpu_wr(gpu_smmu, SMMU_GR0_SMR, 0);
++			printf("SWEET GPU: smmu smr0 dropped read %#x\n",
++			    gpu_rd(gpu_smmu, SMMU_GR0_SMR));
++		}
++	}
++	final = gpu_rd(gpu_smmu, SMMU_GR0_SCR0);
++	after = gpu_rd(gpu_smmu, SMMU_GR0_S2CR);
++	printf("SWEET GPU: smmu final scr0=%#x usfcfg=%u smr0=%#x s2cr0=%#x"
++	    " sgfsr=%#x\n", final, (final & SMMU_SCR0_USFCFG) ? 1u : 0u,
++	    gpu_rd(gpu_smmu, SMMU_GR0_SMR), after,
++	    gpu_rd(gpu_smmu, SMMU_GR0_SGFSR));
+ }
+ 
+ /* One line of SMMU fault state that a hung GMU would leave behind. */
+@@ -3133,10 +3178,24 @@
+ 	gpu_wr(gpu_gmu, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
+ 	gpu_wr(gpu_gmu, GMU_GMU2HOST_INTR_MASK, 0xffffffffu);
+ 	gpu_smmu_gmu_stream();
+-	printf("SWEET GPU: hfi ctrl written mask=%#x\n",
++	/* Reads of the GMU block were still landing after SPTPRAC in 0137/0138,
++	 * so this is the last state before the one store that has wedged twice. */
++	printf("SWEET GPU: hfi pre init=%#x status=%#x ao=%#x fence-ctl=%#x"
++	    " fence=%#x mask=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_HFI_CTRL_INIT),
++	    gpu_rd(gpu_gmu, GMU_HFI_CTRL_STATUS), gpu_gmu_ao_counter(),
++	    gpu_rd(gpu_gmu, GMU_AO_AHB_FENCE_CTRL),
++	    gpu_rd(gpu_gmu, GMU_AHB_FENCE_STATUS),
+ 	    gpu_rd(gpu_gmu, GMU_GMU2HOST_INTR_MASK));
+ 	(void)sweet_log_sync();
+ 	gpu_wr(gpu_gmu, GMU_HFI_CTRL_INIT, 1);
++	printf("SWEET GPU: hfi init store done\n");
++	(void)sweet_log_sync();
++	gpu_pause(200);
++	printf("SWEET GPU: hfi post store init=%#x ao=%#x fence=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_HFI_CTRL_INIT), gpu_gmu_ao_counter(),
++	    gpu_rd(gpu_gmu, GMU_AHB_FENCE_STATUS));
++	(void)sweet_log_sync();
+ 	for (i = 1; i <= 1000; ++i) {
+ 		v = gpu_rd(gpu_gmu, GMU_HFI_CTRL_STATUS);
+ 		if (v & 1u) {
