@@ -310,6 +310,15 @@ cdsp_sec (0xa1600000) to 0xaf000000 has no `reg` node, so `gpu_pool=0xa2000000`
 is the probe address. Nothing else in the boot owns that range, and the
 highmem ADT means XNU can neither allocate into it nor have its own memory
 written by the GMU.
+0135 booted (log78): the ring ends at `full pool fixed pa=0xa2000000`, the
+next line 0136 adds, and the machine died there with no panic string. Two
+calls sat in that window. `ml_io_map()` allocates from an 8 MiB io_submap with
+`KMA_NOFAIL`, and the framebuffer's wcomb window already sits in it, so an
+exhaust panics without printing; `bzero()` switches to `DC ZVA` at 128 bytes,
+and ZVA over a `VM_WIMG_IO` (device) mapping is unpredictable. 0136 takes the
+VA from `kernel_map` and maps the PA over it with `pmap_map`, and clears the
+pool with word stores, so neither call is in the path any more. Step prints
+around the map, the clear and the test word name the first one that fails.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
