@@ -249,6 +249,23 @@ window is a full bidirectional passthrough, so the real firmware's silence is
 inside the firmware image (its own fault handling, boot-status word or DRAM/
 DTCM expectations), not the address map. Next on that track: capture the CM3's
 fault/boot status rather than probing more registers.
+0131 (this patch) adapts Trogdor's A618 startup - the first probe that gives the
+CM3 its host memory before release. `gpu_full=1` allocates a 0x30000
+physically-contiguous pool below 4 GiB (`kmem_alloc_contig` with max_pnum
+0xfffff, because the GMU address registers are 32-bit), cleans and invalidates
+it and maps it uncached; builds the a6xx_hfi legacy queue table at +0xc000 with
+one command and one response queue at +0xd000/+0xe000; switches the GPU SMMU to
+bypass (`gpu_gsmmu=1`, on by default: USFCFG cleared and every matched S2CR set
+to bypass, since toco's GMU stream id is not in the vendor DTS) and prints the
+IDR/SMR/S2CR inventory a real stage-1 bank will need; runs the existing
+RSCC/PDC program, stops the RSC, sets GENERAL_7, wakes the RSC (REQ=2, ACK=2,
+SEQ_BUSY=0), loads the image and writes CM3_CFG 0x4052, QTBL_ADDR/INFO,
+PWR_COL_CP_MSG = log|3, PWR_COL_INTER_FRAME_CTRL and the RPMH_CTRL votes; then
+releases with PWR_COL_CP_RESP=0 and polls FW_INIT with the reference's version
+rule (a618_gmu.bin's DTCM 0xafe0 word is 0, which selects BABEFACE with mask
+~0). The CM3 is halted again, the RSC stopped and the votes restored before
+`sweet_gpu_init` returns, so the ladder never runs with the core out of reset.
+Source-level only: not built or booted yet.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
