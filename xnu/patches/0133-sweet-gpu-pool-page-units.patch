@@ -1,0 +1,87 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -393,7 +393,6 @@
+ #define GMU_POOL_LOG_BYTES      0x4000u
+ #define GMU_POOL_HFI            0xc000u
+ #define GMU_POOL_HFI_BYTES      0x4000u
+-#define GMU_POOL_MAX_PNUM       0xfffffu
+ #define HFI_CMD_HEADER          (GMU_POOL_HFI + 24u)
+ #define HFI_RSP_HEADER          (HFI_CMD_HEADER + 48u)
+ #define HFI_CMD_DATA            (GMU_POOL_HFI + 0x1000u)
+@@ -2603,11 +2602,25 @@
+ 	__asm__ volatile("dsb osh" ::: "memory");
+ }
+ 
++/*
++ * The GMU's address registers hold 32 bits of byte address, so the whole pool
++ * has to sit below 4 GiB. Page numbers count PAGE_SIZE units, which is 16 KiB
++ * on arm64 XNU (log76: pn 0x411ea is byte address 0x1047a8000), so the cap is
++ * computed from PAGE_SHIFT rather than written as a 4 KiB page count.
++ */
++static ppnum_t
++gpu_pool_max_pnum(void)
++{
++	return (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1u);
++}
++
+ static bool
+ gpu_gmu_pool_alloc(void)
+ {
+ 	vm_offset_t va = 0;
+ 	ppnum_t pn;
++	addr64_t pa;
++	ppnum_t max_pnum = gpu_pool_max_pnum();
+ 	kern_return_t kr;
+ 
+ 	if (gpu_pool) {
+@@ -2615,12 +2628,11 @@
+ 	}
+ 	/* Every step prints before it runs: the 0131 boot died inside this
+ 	 * function without a panic string, so the last line is the evidence. */
+-	printf("SWEET GPU: full pool alloc %#x bytes below 4 GiB\n",
+-	    GMU_POOL_BYTES);
++	printf("SWEET GPU: full pool alloc %#x bytes below 4 GiB (page %u,"
++	    " max pn %#x)\n", GMU_POOL_BYTES, PAGE_SIZE, max_pnum);
+ 	(void)sweet_log_sync();
+ 	kr = kmem_alloc_contig(kernel_map, &va, GMU_POOL_BYTES, PAGE_MASK,
+-	    GMU_POOL_MAX_PNUM, 0, KMA_DATA | KMA_PERMANENT,
+-	    VM_KERN_MEMORY_IOKIT);
++	    max_pnum, 0, KMA_DATA | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT);
+ 	printf("SWEET GPU: full pool alloc ret=%d va=%#lx\n", kr,
+ 	    (unsigned long)va);
+ 	(void)sweet_log_sync();
+@@ -2639,20 +2651,29 @@
+ 		    (unsigned long)va);
+ 		return false;
+ 	}
+-	gpu_pool_pa = (uint32_t)ptoa_64(pn);
+-	printf("SWEET GPU: full pool pn=%#x pa=%#x\n", pn, gpu_pool_pa);
++	pa = ptoa_64(pn);
++	printf("SWEET GPU: full pool pn=%#x pa=%#llx\n", pn,
++	    (unsigned long long)pa);
+ 	(void)sweet_log_sync();
++	if (pa + GMU_POOL_BYTES > 0x100000000ull) {
++		printf("SWEET GPU: full pool pa %#llx is above the GMU's 32-bit"
++		    " window, not used\n", (unsigned long long)pa);
++		return false;
++	}
++	gpu_pool_pa = (uint32_t)pa;
+ 	/*
+ 	 * The zeroing dirtied cache lines under the kernel VA. Clean and
+ 	 * invalidate before the uncached alias takes over, or a dirty line can
+ 	 * later be evicted over something the GMU wrote.
+ 	 */
+-	flush_dcache64((addr64_t)gpu_pool_pa, GMU_POOL_BYTES, TRUE);
++	flush_dcache64(pa, GMU_POOL_BYTES, TRUE);
+ 	printf("SWEET GPU: full pool flushed\n");
+ 	(void)sweet_log_sync();
+-	gpu_pool = (volatile uint32_t *)ml_io_map(gpu_pool_pa, GMU_POOL_BYTES);
++	gpu_pool = (volatile uint32_t *)ml_io_map((vm_offset_t)pa,
++	    GMU_POOL_BYTES);
+ 	if (!gpu_pool) {
+-		printf("SWEET GPU: full pool: %#x did not map\n", gpu_pool_pa);
++		printf("SWEET GPU: full pool: %#llx did not map\n",
++		    (unsigned long long)pa);
+ 		return false;
+ 	}
+ 	printf("SWEET GPU: full pool va=%#lx pa=%#x bytes=%#x\n",

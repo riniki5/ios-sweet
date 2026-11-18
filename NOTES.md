@@ -277,6 +277,19 @@ after the last tick flush.
 zero, pmap_find_phys, dcache flush, ml_io_map) and zeroes through the cached VA
 with `bzero` instead of relying on `KMA_ZERO` (cpm_allocate does honour it via
 vm_page_zero_fill, but the explicit zero makes the step visible).
+0132 built (run 44315519306) and booted (log76): alloc succeeded
+(`ret=0 va=0xfffffe7bfe39c000`), zeroing succeeded, then the machine died in
+`flush_dcache64`. `pn=0x411ea` next to `pa=0x47a8000` is the tell: arm64 XNU
+here runs PAGE_SHIFT 14 (16 KiB pages), so the page really maps to
+0x1047a8000, above the GMU's 32-bit window, and the `(uint32_t)` cast cut it to
+0x47a8000 - a physical address outside RAM, which the dcache clean then
+touched. The old `GMU_POOL_MAX_PNUM 0xfffff` was also written in 4 KiB pages
+and therefore never constrained anything.
+0133 computes the cap from PAGE_SHIFT (`(4 GiB >> PAGE_SHIFT) - 1`), keeps the
+physical address in `addr64_t`, refuses anything that does not fit below 4 GiB,
+and only then narrows it for the GMU registers. The allocation will have to
+come from low memory this time; if no 12-page run exists below 4 GiB the probe
+now says so and reboots cleanly instead of faulting.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
