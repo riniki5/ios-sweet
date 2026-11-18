@@ -327,9 +327,10 @@ matches (`sum 0xc0607062`), and one poll after release reads
 `fw-init=0xbabeface` - the CM3 runs to its boot handshake on toco for the first
 time. `pool log=0 hfi=0 cmd=0 rsp=0` because the host has not written an HFI
 queue yet: 0137 adds the rest of the a6xx sequence (slumber option, GX/MX vote
-indices, OOB boot/GPU doorbells, SPTPRAC on, HFI_CTRL_INIT, then INIT and
-VERSION messages), grows the pool to 0x20000 and gives the firmware a 16 KiB
-debug region at +0x10000.
+indices, OOB boot doorbell, SPTPRAC on, HFI_CTRL_INIT, the INIT and VERSION
+messages, then the GPU_SET doorbell - resume order, as in the Trogdor port),
+grows the pool to 0x20000 and gives the firmware a 16 KiB debug region at
++0x10000.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove

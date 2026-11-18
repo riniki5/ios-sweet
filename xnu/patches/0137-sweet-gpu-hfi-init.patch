@@ -72,7 +72,7 @@
  		printf("SWEET GPU: full pool pa %#x did not hold the test word\n",
  		    pa);
  		gpu_pool = NULL;
-@@ -2932,6 +2960,143 @@
+@@ -2932,6 +2960,145 @@
  	gpu_hfi_queue(HFI_RSP_HEADER, gpu_pool_pa + HFI_RSP_DATA, 4);
  }
  
@@ -188,6 +188,16 @@
 +	if (i > 10000) {
 +		return false;
 +	}
++	/* The messages go first: GPU_SET is only serviced once the firmware's
++	 * HFI task runs, and the Trogdor port does the same in resume order. */
++	if (!gpu_hfi_send(HFI_MSG_INIT, init, 5)) {
++		printf("SWEET GPU: hfi: no init ack\n");
++		return false;
++	}
++	if (!gpu_hfi_send(HFI_MSG_FW_VERSION, version, 2)) {
++		printf("SWEET GPU: hfi: no version ack\n");
++		return false;
++	}
 +	gpu_wr(gpu_gmu, GMU_HOST2GMU_INTR_SET, 1u << GMU_OOB_GPU_SET);
 +	for (i = 1; i <= 10000; ++i) {
 +		v = gpu_rd(gpu_gmu, GMU_GMU2HOST_INTR_INFO);
@@ -202,21 +212,13 @@
 +		return false;
 +	}
 +	gpu_wr(gpu_gmu, GMU_GMU2HOST_INTR_CLR, 1u << GMU_OOB_GPU_ACK);
-+	if (!gpu_hfi_send(HFI_MSG_INIT, init, 5)) {
-+		printf("SWEET GPU: hfi: no init ack\n");
-+		return false;
-+	}
-+	if (!gpu_hfi_send(HFI_MSG_FW_VERSION, version, 2)) {
-+		printf("SWEET GPU: hfi: no version ack\n");
-+		return false;
-+	}
 +	return true;
 +}
 +
  /* Whatever the CM3 got, the host side goes back to how the probe found it. */
  static void
  gpu_full_undo(uint32_t votes_before, uint32_t general7_before, const char *why)
-@@ -3044,6 +3209,12 @@
+@@ -3044,6 +3211,12 @@
  	printf("SWEET GPU: full pool log=%#x hfi=%#x cmd=%#x rsp=%#x\n",
  	    gpu_pool_rd(GMU_POOL_LOG), gpu_pool_rd(GMU_POOL_HFI),
  	    gpu_pool_rd(HFI_CMD_HEADER + 40), gpu_pool_rd(HFI_RSP_HEADER + 40));
