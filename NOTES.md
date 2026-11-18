@@ -331,6 +331,18 @@ indices, OOB boot doorbell, SPTPRAC on, HFI_CTRL_INIT, the INIT and VERSION
 messages, then the GPU_SET doorbell - resume order, as in the Trogdor port),
 grows the pool to 0x20000 and gives the firmware a 16 KiB debug region at
 +0x10000.
+0137 booted (log80): the boot doorbell is answered (`hfi boot oob polls=3
+info=0x40000000`), SPTPRAC powers (`ctrl=0x778000 status=0x28`) and the GX
+branch comes back live (`gx branch=0x4221 rcg=0x2`) - then the probe thread
+stops answering, before the HFI_CTRL_STATUS line. The ring still flushes vsync,
+so the kernel runs and one MMIO access never returns. The stream that goes
+missing at that moment is the GMU's own: live DT `qcom,gmu`'s `gmu_kernel`
+child is `iommus = <&smmu 5>`, the GPU SMMU has no SMR for ID 5 at boot, and
+with GBPA=0 and SCR0.USFCFG clear the unmatched behaviour is terminate, so the
+CM3's first HFI queue read faults. 0138 programs a BYPASS S2CR plus VALID SMR
+for ID 5 before HFI_CTRL_INIT, unmasks the GMU2HOST interrupts and prints
+sGFSR/GFSYNR0/GFSYNR1/GFSYNR2 on both sides of the handshake, so the next log
+either shows the handshake completing or names the stream that faulted.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
