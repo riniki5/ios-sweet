@@ -265,7 +265,18 @@ releases with PWR_COL_CP_RESP=0 and polls FW_INIT with the reference's version
 rule (a618_gmu.bin's DTCM 0xafe0 word is 0, which selects BABEFACE with mask
 ~0). The CM3 is halted again, the RSC stopped and the votes restored before
 `sweet_gpu_init` returns, so the ladder never runs with the core out of reset.
-Source-level only: not built or booted yet.
+0131 built (run 44310003174) and booted toco (`shim-0131-full.img`, log75): the
+ladder before `gpu_full` is unchanged (CX on, gfx.lvl voted, GX GDSC up) and
+`full begin votes=0 general7=0 gsmmu=1 t=85614` is the last GPU line. The log
+thread's fast ticks 1-3 (100 ms apart) land inside the 300 ms pause that
+follows, and nothing after them is flushed, so the fault is inside
+`gpu_gmu_pool_alloc` within ~100 ms of the pause ending. No panic string is
+reachable: pstore/last_kmsg are empty in recovery and the ring lost the lines
+after the last tick flush.
+0132 therefore prints and syncs before every pool step (alloc call/return,
+zero, pmap_find_phys, dcache flush, ml_io_map) and zeroes through the cached VA
+with `bzero` instead of relying on `KMA_ZERO` (cpm_allocate does honour it via
+vm_page_zero_fill, but the explicit zero makes the step visible).
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
