@@ -319,6 +319,17 @@ and ZVA over a `VM_WIMG_IO` (device) mapping is unpredictable. 0136 takes the
 VA from `kernel_map` and maps the PA over it with `pmap_map`, and clears the
 pool with word stores, so neither call is in the path any more. Step prints
 around the map, the clear and the test word name the first one that fails.
+0136 booted (log79) and the whole startup ran: the pool maps, clears and reads
+back (`full pool mapped va=0xfffffe8f77e34000`, `zeroed (uncached)`, `test word
+ok`), the SMMU bypass is accepted (`scr0=0x200626`, CLIENTPD clear, 0 valid
+streams), the RSC programs, stops and wakes, the 32 KiB firmware readback
+matches (`sum 0xc0607062`), and one poll after release reads
+`fw-init=0xbabeface` - the CM3 runs to its boot handshake on toco for the first
+time. `pool log=0 hfi=0 cmd=0 rsp=0` because the host has not written an HFI
+queue yet: 0137 adds the rest of the a6xx sequence (slumber option, GX/MX vote
+indices, OOB boot/GPU doorbells, SPTPRAC on, HFI_CTRL_INIT, then INIT and
+VERSION messages), grows the pool to 0x20000 and gives the firmware a 16 KiB
+debug region at +0x10000.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
