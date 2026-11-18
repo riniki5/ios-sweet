@@ -294,13 +294,22 @@ now says so and reboots cleanly instead of faulting.
 as `page 16384, max pn 0x3ffff`, but the allocator answers `ret=3 va=0`
 (KERN_NO_SPACE) and the probe drops out with `full stops without host memory`;
 the boot continues and ends normally. `vm_page_bootstrap` reports 255367 free
-pages plus 3385 wired (about 3.95 GiB at 16 KiB), so the low window has no
-12-page contiguous run once the kernel and its pools are placed.
+pages plus 3385 wired: 258752 pages of 16 KiB is exactly the high bank the ADT
+declares (0x100000000..0x1fcc00000), so the kernel has no pages below 4 GiB at
+all and no allocator call can satisfy the GMU's 32-bit registers.
 0134 keeps the layout and tries the full 0x30000 first, then falls back to
-0x10000: the log ends at +0xbfff and the HFI table at +0xffff, so four 16 KiB
-pages hold everything the firmware needs. A run that is found above 4 GiB is
-handed back with `kmem_free` instead of leaked, so the two attempts are
-independent.
+0x10000 (the log ends at +0xbfff, the HFI table at +0xffff): a useful fallback
+for a non-highmem ADT, but on this port it cannot change the log77 answer. A
+run above 4 GiB is handed back with `kmem_free` instead of leaked.
+0135 gives the pool a fixed home instead: `gpu_pool=<hex>` skips the
+allocator, maps that physical address uncached, zeroes it, checks a test word
+and hands the CM3 physical addresses. The address must be DDR the kernel never
+manages and no fixed carve-out covers; in the live DT the low bank is reserved
+in pieces up to `dump_mem` at 0xaf000000, and the gap from the end of
+cdsp_sec (0xa1600000) to 0xaf000000 has no `reg` node, so `gpu_pool=0xa2000000`
+is the probe address. Nothing else in the boot owns that range, and the
+highmem ADT means XNU can neither allocate into it nor have its own memory
+written by the GMU.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
