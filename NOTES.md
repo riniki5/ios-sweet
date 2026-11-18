@@ -49,7 +49,9 @@ sharing fLineBuf with the worker, while the timer can blank during a copy.
 uses preemptible KERNEL priority, and publishes present/skip counters under
 fLock. All panel writes are serialized without holding fLock during the copy.
 The report adds elapsed-us for actual wall-clock FPS. Patch application was
-verified against btc0129. Commit b2c194c is building in CI run 44296530223.
+verified against btc0129. Commit b2c194c built successfully in CI run 44296530223;
+btc0130 source matches SweetFramebuffer-0130.cpp byte-for-byte, and the new
+elapsed-us marker is present in the kernel.
 Local test-fb-0130.py extracts the actual timer, worker, swap and power-change
 code: Clang ASan/UBSan and optimized GCC each pass 13/13 test groups and 1,470
 controlled interleavings. These mock panel writes and the scheduler; they do
@@ -58,7 +60,12 @@ The local full cross-check stops at the missing SDK header TargetConditionals.h.
 Device measurement remains pending.
 The local verdict decoder now reports separate swap/present FPS using elapsed-us,
 labels legacy or missing-report estimates explicitly, and passes synthetic tests.
-Phone remains in TWRP; next boot must use the corrected 0130 image, not 0129.
+Built work-toco/shim-ui-0130.img at 828x1792, SHA-256
+1536ee6a94ec78c76caebbdaa61589c8f33d9303ec3994b72de66bf345c37a51.
+Temporary fastboot boot returned OKAY on 2026-11-18; no partitions flashed.
+iOS UI boot/smoothness is not yet observed. Next: user scrolls 30-60 seconds,
+checks sleep/wake, then returns to TWRP; pull log74 and compare elapsed-time FPS
+and vsync gaps. Do not substitute the untested, racy 0129 image.
 
 **GPU (Adreno 618/a615) under test: 0126.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
