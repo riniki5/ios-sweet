@@ -372,7 +372,8 @@ mapping the reference proved on an A618 - identity tables for the pool in its
 unused first 16 KiB, group 1 / bank 1 with `CBAR 0x1f300`, `TCR2 0x38001`
 (36-bit PA), `TCR 0x802020`, `MAIR0 0xf404ff44`, `SCTLR 0x1027` - checks it
 with the SMMU's own ATS1PR on both ends of the HFI/log/debug regions and on two
-addresses the tables do not cover, then clears sGFSR and prints the final
+addresses the tables do not cover (ATSR bit 0 is ACTIVE while the walk runs and
+PAR is only valid once it clears), then clears sGFSR and prints the final
 sCR0. GR1 is register page 1 (`0x1000`) and the banks follow NUMPAGENDXB
 (0x8000 here), per `arm_smmu_page()`; bank 1 is therefore at `0x9000`. As a
 separate experiment the same boot repeats the one store that wedged while the

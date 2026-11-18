@@ -75,7 +75,7 @@
  /*
   * delay() is microseconds, which is far shorter than the log thread's flush
   * period, so the marker before a risky access has to be a real sleep for the
-@@ -2902,84 +2963,176 @@
+@@ -2902,84 +2963,178 @@
  	gpu_pause(300);
  }
  
@@ -103,8 +103,10 @@
 +	uint32_t i;
 +
 +	gpu_wr64(gpu_smmu, bank + SMMU_CB_ATS1PR, va);
++	/* ATSR bit 0 is ACTIVE while the walk runs; PAR is only valid after it
++	 * clears. */
 +	for (i = 1; i <= 200; ++i) {
-+		if (gpu_rd(gpu_smmu, bank + SMMU_CB_ATSR) & 1u) {
++		if (!(gpu_rd(gpu_smmu, bank + SMMU_CB_ATSR) & 1u)) {
 +			break;
 +		}
 +		delay(100);
@@ -320,7 +322,7 @@
  	    gpu_rd(gpu_smmu, SMMU_GR0_SGFSR));
  }
  
-@@ -3177,7 +3330,7 @@
+@@ -3177,7 +3332,7 @@
  	gpu_smmu_fault("pre-hfi");
  	gpu_wr(gpu_gmu, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
  	gpu_wr(gpu_gmu, GMU_GMU2HOST_INTR_MASK, 0xffffffffu);
@@ -329,7 +331,7 @@
  	/* Reads of the GMU block were still landing after SPTPRAC in 0137/0138,
  	 * so this is the last state before the one store that has wedged twice. */
  	printf("SWEET GPU: hfi pre init=%#x status=%#x ao=%#x fence-ctl=%#x"
-@@ -3272,6 +3425,10 @@
+@@ -3272,6 +3427,10 @@
  	}
  	if (gsmmu) {
  		gpu_smmu_bypass();
@@ -340,7 +342,7 @@
  	} else {
  		printf("SWEET GPU: full smmu left as the bootloader set it\n");
  	}
-@@ -3324,6 +3481,22 @@
+@@ -3324,6 +3483,22 @@
  	    gpu_rd(gpu_gmu, GMU_HFI_QTBL_INFO),
  	    gpu_rd(gpu_gmu, GMU_PWR_COL_CP_MSG), ver, mask, want);
  	gpu_pause(300);
