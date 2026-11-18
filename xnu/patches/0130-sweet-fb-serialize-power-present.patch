@@ -1,0 +1,209 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -128,22 +128,16 @@
+ 	/* Why a present drew nothing: mask, zero id, missing surface, the panel
+ 	 * surface itself, or a surface that fails the bounds checks. */
+ 	uint64_t      fSkip[5];
+-	/* 0127: where a frame's time goes. present() runs in the vsync callback,
+-	 * so its duration delays the next notification; vsync-gap-max is the
+-	 * worst interval between callbacks. Reported and reset every 300 ticks. */
+ 	uint64_t      fPresentNSum;
+ 	uint64_t      fPresentNMax;
+ 	uint64_t      fPresentNWindow;
+ 	uint64_t      fVsyncGapMax;
+ 	uint64_t      fVsyncLast;
+-	/* 0129: the panel copy runs on its own thread. 0127 measured 10 ms per
+-	 * present inside the vsync callback, which stretched the notification
+-	 * cadence to 39 ms while frames were arriving; the timer now only queues
+-	 * the latest swap and returns. */
++	uint64_t      fVsyncWindowStart;
++	/* All panel writes share one worker because the stretch buffer is reused. */
+ 	thread_call_t fPresentCall;
+ 	uint8_t       fPresentRec[SWEET_FB_SWAP_REC_SIZE];
+ 	bool          fPresentPending;
+-	bool          fPresentBusy;
+ 
+ 	static void presentMain(thread_call_param_t arg0, thread_call_param_t arg1);
+ 
+@@ -225,7 +219,8 @@
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
+ 	fLineBuf = (uint32_t *)IOMallocData((size_t)fWidth * 4);
+ 	fWorkLoop = IOWorkLoop::workLoop();
+-	fPresentCall = thread_call_allocate(&AppleCLCD::presentMain, this);
++	fPresentCall = thread_call_allocate_with_options(&AppleCLCD::presentMain, this,
++	    THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL ||
+ 	    fLineBuf == NULL || fPresentCall == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
+@@ -249,6 +244,7 @@
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
++	fVsyncWindowStart = mach_absolute_time();
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -289,44 +285,29 @@
+ 		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
+ 	}
+ 	if ((count % 300u) == 0) {
+-		/* Five seconds at 60 Hz: is the timer running and are frames arriving? */
++		uint64_t elapsed;
++		absolutetime_to_nanoseconds(now - fb->fVsyncWindowStart, &elapsed);
++		fb->fVsyncWindowStart = now;
+ 		uint64_t avg = fb->fPresentNWindow ? fb->fPresentNSum / fb->fPresentNWindow / 1000 : 0;
+-		IOLog("SWEET FB: vsync %llu swaps %llu presents %llu dirty %d off %d ticks %u skip mask/id/nosurf/self/bounds %llu/%llu/%llu/%llu/%llu present-us avg %llu max %llu n %llu vsync-gap-max-us %llu\n",
++		IOLog("SWEET FB: vsync %llu swaps %llu presents %llu dirty %d off %d ticks %u skip mask/id/nosurf/self/bounds %llu/%llu/%llu/%llu/%llu present-us avg %llu max %llu n %llu vsync-gap-max-us %llu elapsed-us %llu\n",
+ 		    count, fb->fSwapCount, fb->fPresentCount, fb->fDirty, fb->fPowerOff,
+ 		    fb->fFlushTicks, fb->fSkip[0], fb->fSkip[1], fb->fSkip[2],
+ 		    fb->fSkip[3], fb->fSkip[4],
+-		    avg, fb->fPresentNMax / 1000, fb->fPresentNWindow, fb->fVsyncGapMax / 1000);
++		    avg, fb->fPresentNMax / 1000, fb->fPresentNWindow, fb->fVsyncGapMax / 1000, elapsed / 1000);
+ 		fb->fPresentNSum = 0;
+ 		fb->fPresentNMax = 0;
+ 		fb->fPresentNWindow = 0;
+ 		fb->fVsyncGapMax = 0;
+ 	}
++	bool kick = false;
+ 	if (fb->fPowerOff) {
+-		/* The panel scans out of fPixels while we write, so a multi-step
+-		 * fade shows as the write front crossing the screen. Blank it in
+-		 * one pass instead. */
+-		bool blank = !fb->fBlanked;
+-		fb->fBlanked = true;
+ 		fb->fPresentPending = false;
+-		IOLockUnlock(fb->fLock);
+-		if (blank) {
+-			bzero((void *)fb->fPixels, (size_t)fb->fRowBytes * fb->fHeight);
+-		}
+-		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+-		return;
+-	}
+-	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+-	bool kick = false;
+-	if (flush) {
+-		/* Copy the (small) record only; present() is 10 ms of panel
+-		 * writes and must not run inside the timer callback. */
++		kick = !fb->fBlanked;
++	} else if (fb->fDirty && (count % fb->fFlushTicks) == 0) {
+ 		memcpy(fb->fPresentRec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+ 		fb->fPresentPending = true;
+ 		fb->fDirty = false;
+-		if (!fb->fPresentBusy) {
+-			fb->fPresentBusy = true;
+-			kick = true;
+-		}
++		kick = true;
+ 	}
+ 	IOLockUnlock(fb->fLock);
+ 	if (kick) {
+@@ -344,8 +325,18 @@
+ 	(void)arg1;
+ 	for (;;) {
+ 		IOLockLock(fb->fLock);
++		if (fb->fPowerOff) {
++			fb->fPresentPending = false;
++			if (fb->fBlanked) {
++				IOLockUnlock(fb->fLock);
++				return;
++			}
++			fb->fBlanked = true;
++			IOLockUnlock(fb->fLock);
++			bzero((void *)fb->fPixels, (size_t)fb->fRowBytes * fb->fHeight);
++			continue;
++		}
+ 		if (!fb->fPresentPending) {
+-			fb->fPresentBusy = false;
+ 			IOLockUnlock(fb->fLock);
+ 			return;
+ 		}
+@@ -358,6 +349,7 @@
+ 		uint64_t ns;
+ 		absolutetime_to_nanoseconds(mach_absolute_time() - p0, &ns);
+ 		IOLockLock(fb->fLock);
++		fb->fPresentCount++;
+ 		fb->fPresentNSum += ns;
+ 		fb->fPresentNWindow++;
+ 		if (ns > fb->fPresentNMax) {
+@@ -421,8 +413,7 @@
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+-
+-	fPresentCount++;
++	uint64_t skipped[5] = { 0 };
+ 
+ 	if (!fConsolePaused) {
+ 		int quiet = 0;
+@@ -443,7 +434,7 @@
+ 		int32_t w = (int32_t)get32(b, 8), h = (int32_t)get32(b, 12);
+ 
+ 		if (!(mask & (1u << layer)) || id == 0) {
+-			fSkip[(mask & (1u << layer)) ? 1 : 0]++;
++			skipped[(mask & (1u << layer)) ? 1 : 0]++;
+ 			continue;
+ 		}
+ 		SweetSurface *s = sweet_surface_copy(id);
+@@ -455,7 +446,7 @@
+ 			    get32(a, 12), dx, dy, w, h);
+ 		}
+ 		if (s == NULL || s == fSurface) {
+-			fSkip[s == NULL ? 2 : 3]++;
++			skipped[s == NULL ? 2 : 3]++;
+ 			OSSafeReleaseNULL(s);
+ 			continue;
+ 		}
+@@ -510,7 +501,7 @@
+ 		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
+ 		    s->memory == NULL || last > s->memory->getLength()) {
+ 			src = 0;
+-			fSkip[4]++;
++			skipped[4]++;
+ 		}
+ 		if (src != 0 && bpe == 4) {
+ 			if (!fStretch) {
+@@ -563,6 +554,11 @@
+ 		}
+ 		s->release();
+ 	}
++	IOLockLock(fLock);
++	for (unsigned int i = 0; i < 5; i++) {
++		fSkip[i] += skipped[i];
++	}
++	IOLockUnlock(fLock);
+ }
+ 
+ bool
+@@ -699,25 +695,22 @@
+ 	case kSweetFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
+-			uint8_t *rec = NULL;
++			bool kick = false;
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
+ 				fFB->fBlanked = false;
+-				fFB->fDirty = true;     /* on: redraw the latest frame */
++				fFB->fPresentPending = !off;
+ 				if (!off) {
+-					rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+-					if (rec != NULL) {
+-						memcpy(rec, fFB->fPending, SWEET_FB_SWAP_REC_SIZE);
+-						fFB->fDirty = false;
+-					}
++					memcpy(fFB->fPresentRec, fFB->fPending, SWEET_FB_SWAP_REC_SIZE);
++					fFB->fDirty = false;
+ 				}
++				kick = true;
+ 			}
+ 			uint64_t swaps = fFB->fSwapCount, presents = fFB->fPresentCount;
+ 			IOLockUnlock(fFB->fLock);
+-			if (rec != NULL) {
+-				fFB->present(rec);      /* wake: show the last frame at once */
+-				IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++			if (kick) {
++				thread_call_enter(fFB->fPresentCall);
+ 			}
+ 			IOLog("SWEET FB: display %s swaps %llu presents %llu\n",
+ 			    off ? "off" : "on", swaps, presents);

@@ -35,6 +35,24 @@ cached memory and does one memcpy per row into the write-combining panel.
 vsync timer (the 39 ms gaps); the timer only queues the latest swap. Both
 build trees verified byte-identical to `work-toco/SweetFramebuffer-012{8,9}.cpp`.
 
+2026-11-18: log73 is the 0128 boot at 828x1792 (39,636 lines, flush 5011).
+Across four windows with >=20 swaps, weighted present time is 11.757 ms;
+0127/log71 was 10.741 ms by the same filter. No copy-speed improvement is
+established. The session was mostly idle; its sparse interaction windows are
+not a controlled FPS comparison. Earlier FPS figures assume 60 timer ticks/s
+and overestimate wall-clock FPS when callbacks run late; the CA budget above
+is an inference, not a measured compositor profile.
+
+0129 was not booted: review found that wake still calls present() directly,
+sharing fLineBuf with the worker, while the timer can blank during a copy.
+0130 routes wake redraws and blanking through the same ONCE thread call,
+uses preemptible KERNEL priority, and publishes present/skip counters under
+fLock. All panel writes are serialized without holding fLock during the copy.
+The report adds elapsed-us for actual wall-clock FPS. Patch application was
+verified against btc0129; full kernel build and device measurement are pending.
+The local cross-check stops at the missing SDK header TargetConditionals.h.
+Phone remains in TWRP; next boot must use the corrected 0130 image, not 0129.
+
 **GPU (Adreno 618/a615) under test: 0126.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
 `gpu_gbif`, `gpu_gmuclk`, `gpu_pwrcol`, `gpu_rails`, `gpu_smmu`,
