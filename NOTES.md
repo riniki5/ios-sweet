@@ -290,6 +290,17 @@ physical address in `addr64_t`, refuses anything that does not fit below 4 GiB,
 and only then narrows it for the GMU registers. The allocation will have to
 come from low memory this time; if no 12-page run exists below 4 GiB the probe
 now says so and reboots cleanly instead of faulting.
+0133 built (run 44319059557) and booted (log77): no fault. The cap reads back
+as `page 16384, max pn 0x3ffff`, but the allocator answers `ret=3 va=0`
+(KERN_NO_SPACE) and the probe drops out with `full stops without host memory`;
+the boot continues and ends normally. `vm_page_bootstrap` reports 255367 free
+pages plus 3385 wired (about 3.95 GiB at 16 KiB), so the low window has no
+12-page contiguous run once the kernel and its pools are placed.
+0134 keeps the layout and tries the full 0x30000 first, then falls back to
+0x10000: the log ends at +0xbfff and the HFI table at +0xffff, so four 16 KiB
+pages hold everything the firmware needs. A run that is found above 4 GiB is
+handed back with `kmem_free` instead of leaked, so the two attempts are
+independent.
 Per-log ground truth: local `work-toco/gpu-report.md`.
 
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
