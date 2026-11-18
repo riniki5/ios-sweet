@@ -360,6 +360,24 @@ hang lands on one side of the store. It also writes Linux's non-a7xx AHB fence
 range `0x802800a0`; 0109-0138 wrote `0x80a008a0` (upper field shifted by two,
 lower 0x8a0).
 
+0139 booted (log82) and answered every one of those questions: SMR writes land
+(`smr0=0x80000005` reads back), sCR0 writes are taken but USFCFG cannot be
+cleared (`0x200226` reads back `0x200626`, and the reference's `0x201a36` reads
+back `0x201e36`), and an S2CR BYPASS write (`0x10000`) reads back `0x20000`,
+i.e. this SMMU stores fault where the header says bypass. So unmatched streams
+are terminated and there is no way to make stream 5 bypass; the GMU has to
+translate. The HFI_CTRL_INIT store still wedged: `hfi pre` printed and the
+`hfi init store done` line never reached the ring. 0140 therefore builds the
+mapping the reference proved on an A618 - identity tables for the pool in its
+unused first 16 KiB, group 1 / bank 1 with `CBAR 0x1f300`, `TCR2 0x38001`
+(36-bit PA), `TCR 0x802020`, `MAIR0 0xf404ff44`, `SCTLR 0x1027` - checks it
+with the SMMU's own ATS1PR on both ends of the HFI/log/debug regions and on two
+addresses the tables do not cover, then clears sGFSR and prints the final
+sCR0. GR1 is register page 1 (`0x1000`) and the banks follow NUMPAGENDXB
+(0x8000 here), per `arm_smmu_page()`; bank 1 is therefore at `0x9000`. As a
+separate experiment the same boot repeats the one store that wedged while the
+CM3 is still held, so if it hangs there too the CM3 is exonerated.
+
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
 the patch applied: 0103 had been diffed from the 0101 tree, dxb's patch step
 skipped it whole, and the "0103" kernel behaved exactly like 0102. Every new
