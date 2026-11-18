@@ -379,6 +379,42 @@ sCR0. GR1 is register page 1 (`0x1000`) and the banks follow NUMPAGENDXB
 separate experiment the same boot repeats the one store that wedged while the
 CM3 is still held, so if it hangs there too the CM3 is exonerated.
 
+0140 booted (log83) and the stage-1 bank is real: `cbar=0x1f300`,
+`ttbr0=0x10000a2000000`, `sctlr=0x1027`, `smr=0x80000005`, `s2cr=0x1` all read
+back, and all seven ATS1PR probes came out right - the pool ends, the log, the
+HFI table and the last page translate, both unmapped probes fault - with
+`sGFSR=0` and the bank's `FSR` set only by the two deliberate miss probes. The
+TLB sync poll was backwards (`GSACTIVE` clears when the sync is done), which is
+why that boot still printed NOT VERIFIED; 0141 fixes the poll and clears FSR
+after the probes. The store test with the CM3 held passed for real this time
+(`set reads 0x1`, `cleared reads 0`), the firmware then loaded, matched
+`BABEFACE` on the first poll, acked the boot OOB and reached SPTPRAC - and the
+very next store, `HFI_CTRL_INIT=1` after SPTPRAC, again produced no line after
+it. No SMMU fault was posted in between (`smmu pre-hfi ... sgfsr=0`), so the
+wedge is not a translation fault. 0141 writes two registers that mean nothing
+at that point (GENERAL_7, AO_AHB_FENCE_CTRL) and re-probes the queue page
+before the store: if those land, the GMU register window is still alive and the
+hang is the firmware's reaction to CTRL_INIT; if they hang, the window is dead
+before HFI is touched. Nothing reached the ring after the wedge in log83, not
+even the periodic `SWEET FB` line, which points at a panic or reset rather than
+a hung probe thread.
+
+0141 booted (log84) and answered it: `tlb=1 polls=1`, the map now reports
+verified, and at the exact point that used to wedge the write path still works
+- `GENERAL_7` and `AO_AHB_FENCE_CTRL` writes read back, and a fresh ATS1PR of
+the HFI page translates (`par=0xa200cb82`). Only the `HFI_CTRL_INIT` store
+still kills the machine (again no further ring line after it). So the GMU's
+register window is alive and the trigger is the CM3's first host access as it
+starts the HFI. The one thing that differs from the reference there is the
+address the firmware is pointed at: it points the GMU at IOVAs in a
+`0x60000000` window, while 0141 used the pool's physical address, which has
+bit 31 set and is the first address the CM3 had ever used when it wedged. 0142
+therefore maps the pool at IOVA `0x60000000` (L1 index 1, L2 index 256, one L3
+for the 32 pages), and writes that window into QTBL_ADDR (`0x6000c000`), the
+queue headers (`0x6000d000`/`0x6000e000`), CP_MSG (`0x60008003`) and the HFI
+INIT debug page (`0x60010000`), with the ATS probes moved to the same IOVAs
+plus one past the window and one in the low space.
+
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
 the patch applied: 0103 had been diffed from the 0101 tree, dxb's patch step
 skipped it whole, and the "0103" kernel behaved exactly like 0102. Every new
