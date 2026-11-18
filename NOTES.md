@@ -57,15 +57,24 @@ code: Clang ASan/UBSan and optimized GCC each pass 13/13 test groups and 1,470
 controlled interleavings. These mock panel writes and the scheduler; they do
 not establish real-device smoothness, cache behavior or kernel integration.
 The local full cross-check stops at the missing SDK header TargetConditionals.h.
-Device measurement remains pending.
 The local verdict decoder now reports separate swap/present FPS using elapsed-us,
 labels legacy or missing-report estimates explicitly, and passes synthetic tests.
 Built work-toco/shim-ui-0130.img at 828x1792, SHA-256
 1536ee6a94ec78c76caebbdaa61589c8f33d9303ec3994b72de66bf345c37a51.
 Temporary fastboot boot returned OKAY on 2026-11-18; no partitions flashed.
-iOS UI boot/smoothness is not yet observed. Next: user scrolls 30-60 seconds,
-checks sleep/wake, then returns to TWRP; pull log74 and compare elapsed-time FPS
-and vsync gaps. Do not substitute the untested, racy 0129 image.
+log74 pulled after the user returned to TWRP (5,152 lines, flush 209) confirms
+0130 ran at 828x1792: 401 elapsed-time reports, worst vsync gap 18.204 ms
+versus log73's 35.045 ms and log71's 39.368 ms. The interaction windows ending
+at ticks 118500-119400 average 9.36 completed presents/s and 11.445 ms per
+present; the best five-second window is 11.72 completed presents/s. Their
+maximum vsync gap is 17.864 ms. The off-timer copy fixes notification pacing,
+not the overall render rate; user workloads differ, so do not claim an FPS
+improvement or regression across these boots. Early display off/on requests
+are logged and presentations resume, but no late deliberate sleep/wake cycle
+is evidenced. No panic marker was found. Phone is back in TWRP; no new boot.
+Do not substitute the untested, racy 0129 image. The CPU smoothness goal remains
+open; the 60 FPS target still requires further renderer/GPU work, without a
+reliable completion date.
 
 **GPU (Adreno 618/a615) under test: 0126.** The bring-up lives in
 `bsd/dev/sweet_gpu.c`, boot arg `gpu=1` (plus `gpu_gx`, `gpu_cx`, `gpu_rcg`,
