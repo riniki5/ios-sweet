@@ -49,8 +49,15 @@ sharing fLineBuf with the worker, while the timer can blank during a copy.
 uses preemptible KERNEL priority, and publishes present/skip counters under
 fLock. All panel writes are serialized without holding fLock during the copy.
 The report adds elapsed-us for actual wall-clock FPS. Patch application was
-verified against btc0129; full kernel build and device measurement are pending.
-The local cross-check stops at the missing SDK header TargetConditionals.h.
+verified against btc0129. Commit b2c194c is building in CI run 44296530223.
+Local test-fb-0130.py extracts the actual timer, worker, swap and power-change
+code: Clang ASan/UBSan and optimized GCC each pass 13/13 test groups and 1,470
+controlled interleavings. These mock panel writes and the scheduler; they do
+not establish real-device smoothness, cache behavior or kernel integration.
+The local full cross-check stops at the missing SDK header TargetConditionals.h.
+Device measurement remains pending.
+The local verdict decoder now reports separate swap/present FPS using elapsed-us,
+labels legacy or missing-report estimates explicitly, and passes synthetic tests.
 Phone remains in TWRP; next boot must use the corrected 0130 image, not 0129.
 
 **GPU (Adreno 618/a615) under test: 0126.** The bring-up lives in
