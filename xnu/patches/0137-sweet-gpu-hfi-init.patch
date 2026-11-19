@@ -1,0 +1,233 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -308,8 +308,28 @@
+ #define GMU_HFI_QTBL_INFO       GMU_REG(0x1f984u)
+ #define GMU_HFI_QTBL_ADDR       GMU_REG(0x1f985u)
+ #define GMU_HFI_CTRL_STATUS     GMU_REG(0x1f980u)
++#define GMU_HFI_CTRL_INIT       GMU_REG(0x1f986u)
++#define GMU_GMU2HOST_INTR_CLR   GMU_REG(0x1f991u)
++#define GMU_GMU2HOST_INTR_INFO  GMU_REG(0x1f992u)
++#define GMU_HOST2GMU_INTR_SET   GMU_REG(0x1f994u)
++/* The GMU's own rail votes: a6xx_gmu_oob_bits, bits of the interrupt words. */
++#define GMU_OOB_GPU_SET         16u
++#define GMU_OOB_GPU_ACK         24u
++#define GMU_OOB_BOOT_SET        22u
++#define GMU_OOB_BOOT_ACK        30u
+ #define GMU_GENERAL_0           GMU_REG(0x1f9c5u)
+ #define GMU_GENERAL_7           GMU_REG(0x1f9ccu)
++/*
++ * What the CM3 votes through its own RSC channel when it powers GX. The index
++ * is an entry of the cmd-db level table, not a level: log78's gfx.lvl map has
++ * 416 at index 8 as its top, and mx.lvl tops out at 384 (index 4), which is
++ * where the ARC rule for a higher request lands.
++ */
++#define GMU_BOOT_SLUMBER_OPTION GMU_REG(0x1cbf8u)
++#define GMU_GX_VOTE_IDX         GMU_REG(0x1cbf9u)
++#define GMU_MX_VOTE_IDX         GMU_REG(0x1cbfau)
++#define GMU_GX_VOTE_TOP         8u
++#define GMU_MX_VOTE_TOP         4u
+ #define GMU_PWR_COL_CP_MSG      GMU_REG(0x1f900u)
+ #define GMU_AHB_FENCE_RANGE_0   GMU_REG(0x23b11u)
+ /* adreno_a6xx_gmu.c GMU_FENCE_RANGE_MASK. 0109: 0108 and earlier wrote
+@@ -391,12 +411,13 @@
+  * every address below must come from physical memory below 4 GiB.
+  * Offsets match the reference (a6xx_hfi.c legacy): table at +0xc000, one
+  * 4 KiB command queue at +0xd000, the response queue at +0xe000.
+- * The compact size is what the log and HFI table actually need (both regions
+- * end at +0xffff); the full size is tried first and only kept if the
+- * allocator can still produce a 12-page contiguous run below 4 GiB.
++ * The HFI init message also names a 16 KiB debug region for the firmware,
++ * which the 0x10000 pool had no room for; it now follows the queues at
++ * +0x10000 and the pool is 0x20000. The full size is tried first and only kept
++ * if the allocator can still produce a contiguous run below 4 GiB.
+  */
+ #define GMU_POOL_BYTES_FULL     0x30000u
+-#define GMU_POOL_BYTES          0x10000u
++#define GMU_POOL_BYTES          0x20000u
+ #define GMU_POOL_LOG            0x8000u
+ #define GMU_POOL_LOG_BYTES      0x4000u
+ #define GMU_POOL_HFI            0xc000u
+@@ -406,6 +427,13 @@
+ #define HFI_CMD_DATA            (GMU_POOL_HFI + 0x1000u)
+ #define HFI_RSP_DATA            (GMU_POOL_HFI + 0x2000u)
+ #define HFI_QUEUE_WORDS         1024u
++#define HFI_READ_INDEX          40u
++#define HFI_WRITE_INDEX         44u
++#define HFI_MSG_INIT            0u
++#define HFI_MSG_FW_VERSION      1u
++#define HFI_MSG_ERROR           100u
++#define GMU_POOL_DEBUG          0x10000u
++#define GMU_DEBUG_BYTES         0x4000u
+ /* PWR_COL_CP_MSG's low bits: the log is four 4 KiB pages, as Linux writes it. */
+ #define GMU_CP_MESSAGE_PAGES    3u
+ 
+@@ -2673,8 +2701,8 @@
+ 	__asm__ volatile("dsb osh" ::: "memory");
+ 	printf("SWEET GPU: full pool zeroed (uncached)\n");
+ 	(void)sweet_log_sync();
+-	gpu_pool_wr(0xfffcu, 0xa5a5a5a5u);
+-	if (gpu_pool_rd(0xfffcu) != 0xa5a5a5a5u) {
++	gpu_pool_wr(GMU_POOL_BYTES - 4u, 0xa5a5a5a5u);
++	if (gpu_pool_rd(GMU_POOL_BYTES - 4u) != 0xa5a5a5a5u) {
+ 		printf("SWEET GPU: full pool pa %#x did not hold the test word\n",
+ 		    pa);
+ 		gpu_pool = NULL;
+@@ -2932,6 +2960,145 @@
+ 	gpu_hfi_queue(HFI_RSP_HEADER, gpu_pool_pa + HFI_RSP_DATA, 4);
+ }
+ 
++/*
++ * One HFI message and its acknowledgement, a6xx_hfi.c legacy wire format: the
++ * message goes into the command queue, whose read/write indices live at +40
++ * and +44 of the queue header, and the doorbell is host2gmu bit 0.
++ */
++static bool
++gpu_hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords)
++{
++	static uint32_t seq;
++	uint32_t at, i, read, size, response[24];
++	bool acked = false;
++
++	msg[0] = ((++seq << 20) | (dwords << 8) | id);
++	at = gpu_pool_rd(HFI_CMD_HEADER + HFI_WRITE_INDEX);
++	for (i = 0; i < dwords; ++i) {
++		gpu_pool_wr(HFI_CMD_DATA + at * 4u, msg[i]);
++		at = (at + 1u) % HFI_QUEUE_WORDS;
++	}
++	gpu_pool_wr(HFI_CMD_HEADER + HFI_WRITE_INDEX, at);
++	gpu_wr(gpu_gmu, GMU_HOST2GMU_INTR_SET, 1u);
++	for (i = 1; i <= 3000; ++i) {
++		if (gpu_rd(gpu_gmu, GMU_GMU2HOST_INTR_INFO) & 1u) {
++			break;
++		}
++		delay(100);
++	}
++	printf("SWEET GPU: hfi msg %u polls=%u info=%#x\n", id, i,
++	    gpu_rd(gpu_gmu, GMU_GMU2HOST_INTR_INFO));
++	(void)sweet_log_sync();
++	if (i > 3000) {
++		return false;
++	}
++	gpu_wr(gpu_gmu, GMU_GMU2HOST_INTR_CLR, 1u);
++	for (unsigned tries = 0; tries < 8 && !acked; ++tries) {
++		read = gpu_pool_rd(HFI_RSP_HEADER + HFI_READ_INDEX);
++		if (read == gpu_pool_rd(HFI_RSP_HEADER + HFI_WRITE_INDEX) ||
++		    read >= HFI_QUEUE_WORDS) {
++			break;
++		}
++		size = (gpu_pool_rd(HFI_RSP_DATA + read * 4u) >> 8) & 0xffu;
++		if (!size || size > sizeof(response) / sizeof(response[0])) {
++			printf("SWEET GPU: hfi msg %u answer size %u\n", id, size);
++			break;
++		}
++		for (i = 0; i < size; ++i) {
++			response[i] = gpu_pool_rd(HFI_RSP_DATA + read * 4u);
++			read = (read + 1u) % HFI_QUEUE_WORDS;
++		}
++		gpu_pool_wr(HFI_RSP_HEADER + HFI_READ_INDEX, read);
++		if ((response[0] & 0xffu) == HFI_MSG_ERROR) {
++			printf("SWEET GPU: hfi fw error %#x for msg %u\n",
++			    size > 1 ? response[1] : 0u, id);
++			continue;
++		}
++		if (((response[1] >> 20) & 0xfffu) != seq) {
++			continue;
++		}
++		printf("SWEET GPU: hfi msg %u ack status=%u payload=%#x\n", id,
++		    response[2], response[3]);
++		(void)sweet_log_sync();
++		acked = response[2] == 0;
++	}
++	return acked;
++}
++
++/*
++ * The handshake a6xx_gmu_resume runs once FW_INIT_RESULT is in: tell the CM3
++ * which rail entries to vote, let it boot GX and acknowledge, power SPTPRAC,
++ * start the HFI queues, then hand the firmware an address space and ask it
++ * what version it is.
++ */
++static bool
++gpu_gmu_hfi_start(void)
++{
++	uint32_t v = 0, i;
++	uint32_t init[5] = { 0, 0, gpu_pool_pa + GMU_POOL_DEBUG,
++	    GMU_DEBUG_BYTES, 1 };
++	uint32_t version[2] = { 0, (1u << 28) | (1u << 19) | (1u << 17) };
++
++	printf("SWEET GPU: hfi begin t=%llu\n", gpu_uptime_ms());
++	(void)sweet_log_sync();
++	gpu_wr(gpu_gmu, GMU_BOOT_SLUMBER_OPTION, 0);
++	gpu_wr(gpu_gmu, GMU_GX_VOTE_IDX, GMU_GX_VOTE_TOP);
++	gpu_wr(gpu_gmu, GMU_MX_VOTE_IDX, GMU_MX_VOTE_TOP);
++	gpu_wr(gpu_gmu, GMU_HOST2GMU_INTR_SET, 1u << GMU_OOB_BOOT_SET);
++	for (i = 1; i <= 10000; ++i) {
++		v = gpu_rd(gpu_gmu, GMU_GMU2HOST_INTR_INFO);
++		if (v & (1u << GMU_OOB_BOOT_ACK)) {
++			break;
++		}
++		delay(100);
++	}
++	printf("SWEET GPU: hfi boot oob polls=%u info=%#x\n", i, v);
++	(void)sweet_log_sync();
++	if (i > 10000) {
++		return false;
++	}
++	gpu_wr(gpu_gmu, GMU_GMU2HOST_INTR_CLR, 1u << GMU_OOB_BOOT_ACK);
++	gpu_sptprac_on();
++	gpu_wr(gpu_gmu, GMU_HFI_CTRL_INIT, 1);
++	for (i = 1; i <= 10000; ++i) {
++		v = gpu_rd(gpu_gmu, GMU_HFI_CTRL_STATUS);
++		if (v & 1u) {
++			break;
++		}
++		delay(100);
++	}
++	printf("SWEET GPU: hfi ctrl polls=%u status=%#x\n", i, v);
++	(void)sweet_log_sync();
++	if (i > 10000) {
++		return false;
++	}
++	/* The messages go first: GPU_SET is only serviced once the firmware's
++	 * HFI task runs, and the Trogdor port does the same in resume order. */
++	if (!gpu_hfi_send(HFI_MSG_INIT, init, 5)) {
++		printf("SWEET GPU: hfi: no init ack\n");
++		return false;
++	}
++	if (!gpu_hfi_send(HFI_MSG_FW_VERSION, version, 2)) {
++		printf("SWEET GPU: hfi: no version ack\n");
++		return false;
++	}
++	gpu_wr(gpu_gmu, GMU_HOST2GMU_INTR_SET, 1u << GMU_OOB_GPU_SET);
++	for (i = 1; i <= 10000; ++i) {
++		v = gpu_rd(gpu_gmu, GMU_GMU2HOST_INTR_INFO);
++		if (v & (1u << GMU_OOB_GPU_ACK)) {
++			break;
++		}
++		delay(100);
++	}
++	printf("SWEET GPU: hfi gpu oob polls=%u info=%#x\n", i, v);
++	(void)sweet_log_sync();
++	if (i > 10000) {
++		return false;
++	}
++	gpu_wr(gpu_gmu, GMU_GMU2HOST_INTR_CLR, 1u << GMU_OOB_GPU_ACK);
++	return true;
++}
++
+ /* Whatever the CM3 got, the host side goes back to how the probe found it. */
+ static void
+ gpu_full_undo(uint32_t votes_before, uint32_t general7_before, const char *why)
+@@ -3044,6 +3211,12 @@
+ 	printf("SWEET GPU: full pool log=%#x hfi=%#x cmd=%#x rsp=%#x\n",
+ 	    gpu_pool_rd(GMU_POOL_LOG), gpu_pool_rd(GMU_POOL_HFI),
+ 	    gpu_pool_rd(HFI_CMD_HEADER + 40), gpu_pool_rd(HFI_RSP_HEADER + 40));
++	if (gpu_gmu_hfi_start()) {
++		printf("SWEET GPU: full hfi up t=%llu\n", gpu_uptime_ms());
++	} else {
++		printf("SWEET GPU: full hfi did not start\n");
++	}
++	(void)sweet_log_sync();
+ 	/*
+ 	 * Halt before the rest of the GMU is read: with the CM3 out of reset
+ 	 * the 0122 boot showed that even the probe's own reads can wedge, and

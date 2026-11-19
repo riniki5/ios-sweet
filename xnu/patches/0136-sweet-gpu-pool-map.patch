@@ -1,0 +1,75 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -212,10 +212,14 @@
+ #include <arm/caches_internal.h>
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
++#include <mach/vm_prot.h>
++#include <machine/memory_types.h>
+ #include <pexpert/pexpert.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern vm_map_address_t pmap_map(vm_map_address_t, vm_offset_t, vm_offset_t,
++    vm_prot_t, unsigned int);
+ extern int hz;
+ extern int sweet_rpmh_arc_probe(const char *res);
+ extern int sweet_rpmh_arc_raise(const char *res, unsigned target);
+@@ -2630,6 +2634,10 @@
+ static bool
+ gpu_gmu_pool_fixed(uint32_t pa)
+ {
++	vm_offset_t va = 0;
++	kern_return_t kr;
++	uint32_t off;
++
+ 	if (pa < 0x80000000u || (pa & (PAGE_SIZE - 1)) ||
+ 	    (uint64_t)pa + GMU_POOL_BYTES > 0x100000000ull) {
+ 		printf("SWEET GPU: full pool pa %#x is not page-aligned DDR below"
+@@ -2639,13 +2647,32 @@
+ 	printf("SWEET GPU: full pool fixed pa=%#x bytes=%#x\n", pa,
+ 	    GMU_POOL_BYTES);
+ 	(void)sweet_log_sync();
+-	gpu_pool = (volatile uint32_t *)ml_io_map(pa, GMU_POOL_BYTES);
+-	if (!gpu_pool) {
+-		printf("SWEET GPU: full pool: %#x did not map\n", pa);
++	/*
++	 * Not ml_io_map(): its 8 MiB io_submap already holds the framebuffer
++	 * window, and a KMA_NOFAIL exhaust there panics without a string. A
++	 * kernel_map allocation mapped over is the same uncached alias.
++	 */
++	kr = kmem_alloc(kernel_map, &va, GMU_POOL_BYTES,
++	    KMA_DATA | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT);
++	if (kr != KERN_SUCCESS || va == 0) {
++		printf("SWEET GPU: full pool: va alloc ret=%d\n", kr);
+ 		return false;
+ 	}
+-	/* The mapping is uncached, so this lands in memory as written. */
+-	bzero((char *)gpu_pool, GMU_POOL_BYTES);
++	pmap_map(va, pa, pa + GMU_POOL_BYTES, VM_PROT_DEFAULT, VM_WIMG_IO);
++	gpu_pool = (volatile uint32_t *)va;
++	printf("SWEET GPU: full pool mapped va=%#lx\n", (unsigned long)va);
++	(void)sweet_log_sync();
++	/*
++	 * bzero() reaches for DC ZVA at 128 bytes and up, and ZVA is
++	 * unpredictable on device memory, so clear with word stores.
++	 */
++	__asm__ volatile("dmb oshst" ::: "memory");
++	for (off = 0; off < GMU_POOL_BYTES; off += 4) {
++		gpu_pool[off / 4] = 0;
++	}
++	__asm__ volatile("dsb osh" ::: "memory");
++	printf("SWEET GPU: full pool zeroed (uncached)\n");
++	(void)sweet_log_sync();
+ 	gpu_pool_wr(0xfffcu, 0xa5a5a5a5u);
+ 	if (gpu_pool_rd(0xfffcu) != 0xa5a5a5a5u) {
+ 		printf("SWEET GPU: full pool pa %#x did not hold the test word\n",
+@@ -2655,7 +2682,7 @@
+ 	}
+ 	gpu_pool_size = GMU_POOL_BYTES;
+ 	gpu_pool_pa = pa;
+-	printf("SWEET GPU: full pool zeroed (uncached)\n");
++	printf("SWEET GPU: full pool test word ok\n");
+ 	(void)sweet_log_sync();
+ 	return true;
+ }

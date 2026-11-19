@@ -1,0 +1,99 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -677,10 +677,10 @@
+  *   | u64 flush sequence
+  * ring offset of byte n = n % ring size. Read it from a recovery with
+  * tools/sweet-log-pull.sh. Disabled with boot-arg sweetlog=0.
+- * The thread writes once before its first sleep and then every ufslogsecs
+- * (default 10) seconds, or every hz/10 ticks with sweetlogfast=1; that
+- * cadence is what lets a boot that hangs cleanly in the middle of driver
+- * bring-up still leave its last steps on disk.
++ * The thread flushes every ufslogsecs (default 10) seconds, or every hz/10
++ * ticks with sweetlogfast=1. The first write stays behind the first sleep: the
++ * build that wrote at t=0 (log43) stops at the log banner and never reaches a
++ * second flush.
+  */
+ #define SWEET_LOG_SIZE          (4u << 20)
+ #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
+@@ -753,46 +753,44 @@
+ 
+ 	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx),"
+ 	    " flush every %d ticks\n", SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base, wait);
+-	/* Write before the first sleep: a boot that dies early still leaves a
+-	 * header with its own seq/total, which tells the two apart from a stale
+-	 * ring written by the previous boot. */
+ 	for (;;) {
++		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", wait);
+ 		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
+-		if (total != flushed) {
+-			uint64_t pos = total - flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : flushed;
+-			int error = 0;
+-
+-			lck_mtx_lock(&sweet_ufs_lock);
+-			while (pos < total && !error) {
+-				uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
+-				uint32_t blk = off / UFS_BLOCK;
+-				uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
+-				uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
+-				    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
+-				memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
+-				error = ufs_write_blocks(base + 1 + blk, n);
+-				pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
+-			}
+-			if (!error) {
+-				struct sweet_log_header h = {
+-					.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
+-					.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = ++seq,
+-				};
+-				bzero(bounce, UFS_BLOCK);
+-				memcpy(bounce, &h, sizeof(h));
+-				error = ufs_write_blocks(base, 1);
+-			}
+-			if (!error) {
+-				error = ufs_sync_cache();
+-			}
+-			lck_mtx_unlock(&sweet_ufs_lock);
+-			if (error) {
+-				printf("SWEET LOG: write failed (%d), stopping\n", error);
+-				return;
+-			}
+-			flushed = total;
++		if (total == flushed) {
++			continue;
+ 		}
+-		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", wait);
++		uint64_t pos = total - flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : flushed;
++		int error = 0;
++
++		lck_mtx_lock(&sweet_ufs_lock);
++		while (pos < total && !error) {
++			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
++			uint32_t blk = off / UFS_BLOCK;
++			uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
++			uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
++			    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
++			memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
++			error = ufs_write_blocks(base + 1 + blk, n);
++			pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
++		}
++		if (!error) {
++			struct sweet_log_header h = {
++				.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
++				.version = 1, .size = SWEET_LOG_SIZE, .total = total, .seq = ++seq,
++			};
++			bzero(bounce, UFS_BLOCK);
++			memcpy(bounce, &h, sizeof(h));
++			error = ufs_write_blocks(base, 1);
++		}
++		if (!error) {
++			error = ufs_sync_cache();
++		}
++		lck_mtx_unlock(&sweet_ufs_lock);
++		if (error) {
++			printf("SWEET LOG: write failed (%d), stopping\n", error);
++			return;
++		}
++		flushed = total;
+ 	}
+ }
+ 

@@ -1,0 +1,66 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -176,6 +176,11 @@
+  * two state words mainline a6xx_gmu_start() consults before releasing the
+  * core: DTCM 0xff8 (which init value to expect: 0xBABEFACE or 0x100) and
+  * GENERAL_7 (TCM retention), plus FW_BUSY samples during the poll.
++ * 0117 adds one read-only discriminator: the GMU always-on counter plus the
++ * two AO busy statuses after the poll. The counter runs off CXO regardless of
++ * the CM3, so a frozen pair means the GMU is not clocked at all while a moving
++ * pair leaves the reset/vector path as the wall - the one question log59 could
++ * not answer.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -280,6 +285,13 @@
+ #define GMU_FENCE_RANGE_MASK	\
+ 	((0x1u << 31) | (((0xAu << 2)) << 18) | 0x8a0u)
+ #define GMU_SPTPRAC_PWR_STATUS  GMU_REG(0x1f8d0u)
++/* a6xx_gmu_read_ao_counter(): the GMU's always-on clock counter. Two reads a
++ * fixed interval apart say whether anything inside the GMU is clocked at all,
++ * which is independent of the CM3's reset state. */
++#define GMU_AO_COUNTER_L        GMU_REG(0x1f888u)
++#define GMU_AO_COUNTER_H        GMU_REG(0x1f889u)
++#define GMU_AO_CX_BUSY_STATUS   GMU_REG(0x23b0cu)
++#define GMU_AO_CX_BUSY_STATUS2  GMU_REG(0x23b0du)
+ #define GMU_RPMH_POWER_STATE    GMU_REG(0x1f8ecu)
+ #define GMU_PWR_COL_IFC         GMU_REG(0x1f8c0u)
+ #define GMU_RPMH_CTRL           GMU_REG(0x1f8e8u)
+@@ -1941,6 +1953,19 @@
+ 	}
+ }
+ 
++static uint32_t
++gpu_gmu_ao_counter(void)
++{
++	uint32_t hi = gpu_rd(gpu_gmu, GMU_AO_COUNTER_H);
++	uint32_t lo = gpu_rd(gpu_gmu, GMU_AO_COUNTER_L);
++	uint32_t hi2 = gpu_rd(gpu_gmu, GMU_AO_COUNTER_H);
++
++	if (hi2 != hi) {
++		lo = gpu_rd(gpu_gmu, GMU_AO_COUNTER_L);
++	}
++	return lo;
++}
++
+ /*
+  * gpu_xrel=1: issue the release store from here instead of the boot thread.
+  * log53 showed the store returns in this context and that the boot thread dies
+@@ -2002,6 +2027,17 @@
+ 	if (!val) {
+ 		printf("SWEET GPU: xrel fw-init stayed 0 for 2000 ms\n");
+ 	}
++	/* The GMU's always-on counter ticks off the CXO whether or not the CM3
++	 * runs; a frozen counter means nothing in the GMU is clocked and the
++	 * release was never reachable, a moving one puts the wall back on the
++	 * reset/vector path. The AO busy statuses are what kgsl prints when the
++	 * GMU will not idle. */
++	uint32_t ao0 = gpu_gmu_ao_counter();
++	gpu_pause(100);
++	printf("SWEET GPU: xrel ao %#x -> %#x busy=%#x/%#x\n", ao0,
++	    gpu_gmu_ao_counter(),
++	    gpu_rd(gpu_gmu, GMU_AO_CX_BUSY_STATUS),
++	    gpu_rd(gpu_gmu, GMU_AO_CX_BUSY_STATUS2));
+ 	gpu_pause(300);
+ 	printf("SWEET GPU: xrel sentinel=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_ITCM + 0x130));

@@ -1,0 +1,63 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -3085,8 +3085,10 @@
+ 	(void)sweet_log_sync();
+ 	gpu_wr(gpu_smmu, SMMU_TLBIALLNSNH, 0);
+ 	gpu_wr(gpu_smmu, SMMU_TLBGSYNC, 0);
++	/* TLBGSTATUS bit 0 is GSACTIVE while the sync runs; wait for it to
++	 * clear, as arm_smmu_tlb_sync_global does. */
+ 	for (i = 1; i <= 200; ++i) {
+-		if (gpu_rd(gpu_smmu, SMMU_TLBGSTATUS) & 1u) {
++		if (!(gpu_rd(gpu_smmu, SMMU_TLBGSTATUS) & 1u)) {
+ 			break;
+ 		}
+ 		delay(100);
+@@ -3102,7 +3104,7 @@
+ 	gpu_wr(gpu_smmu, SMMU_GR0_SGFSR, gpu_rd(gpu_smmu, SMMU_GR0_SGFSR));
+ 	ok = tlb;
+ 	/* Both ends of what the firmware reads, then two addresses the tables do
+-	 * not cover: the fault probes are expected and leave sGFSR set. */
++	 * not cover: the miss probes are expected and set the bank's FSR. */
+ 	ok &= gpu_smmu_probe(bank, gpu_pool_pa, TRUE);
+ 	ok &= gpu_smmu_probe(bank, gpu_pool_pa + GMU_POOL_LOG, TRUE);
+ 	ok &= gpu_smmu_probe(bank, gpu_pool_pa + GMU_POOL_HFI, TRUE);
+@@ -3110,6 +3112,10 @@
+ 	ok &= gpu_smmu_probe(bank, gpu_pool_pa + (pages - 1u) * 0x1000u, TRUE);
+ 	ok &= gpu_smmu_probe(bank, gpu_pool_pa + 0x400000u, FALSE);
+ 	ok &= gpu_smmu_probe(bank, 0x60000000u, FALSE);
++	/* The CM3 should start from a clean bank. */
++	gpu_wr(gpu_smmu, bank + SMMU_CB_FSR,
++	    gpu_rd(gpu_smmu, bank + SMMU_CB_FSR));
++	gpu_wr(gpu_smmu, SMMU_GR0_SGFSR, gpu_rd(gpu_smmu, SMMU_GR0_SGFSR));
+ 	printf("SWEET GPU: smmu map %s sgfsr=%#x gfsynr0=%#x fsr=%#x\n",
+ 	    ok ? "verified" : "NOT VERIFIED", gpu_rd(gpu_smmu, SMMU_GR0_SGFSR),
+ 	    gpu_rd(gpu_smmu, SMMU_GR0_GFSYNR0),
+@@ -3343,6 +3349,28 @@
+ 	    gpu_rd(gpu_gmu, GMU_AHB_FENCE_STATUS),
+ 	    gpu_rd(gpu_gmu, GMU_GMU2HOST_INTR_MASK));
+ 	(void)sweet_log_sync();
++	/*
++	 * 0140's init-store test proved the store itself works while the CM3
++	 * is held, and 0140's boot then hung on the very same store after
++	 * SPTPRAC. Write registers that carry no meaning here before the real
++	 * store: if these land, the GMU's register window is still taking AP
++	 * writes and the hang is the firmware's reaction to CTRL_INIT; if they
++	 * hang, the window is dead before HFI is touched.
++	 */
++	printf("SWEET GPU: hfi probe writes begin\n");
++	(void)sweet_log_sync();
++	gpu_wr(gpu_gmu, GMU_GENERAL_7, gpu_rd(gpu_gmu, GMU_GENERAL_7));
++	printf("SWEET GPU: hfi probe general7 done reads %#x\n",
++	    gpu_rd(gpu_gmu, GMU_GENERAL_7));
++	(void)sweet_log_sync();
++	gpu_wr(gpu_gmu, GMU_AO_AHB_FENCE_CTRL,
++	    gpu_rd(gpu_gmu, GMU_AO_AHB_FENCE_CTRL));
++	printf("SWEET GPU: hfi probe fence-ctl done reads %#x\n",
++	    gpu_rd(gpu_gmu, GMU_AO_AHB_FENCE_CTRL));
++	(void)sweet_log_sync();
++	(void)gpu_smmu_probe(gpu_smmu_bank_base() + GMU_SMMU_BANK * 0x1000u,
++	    gpu_pool_pa + GMU_POOL_HFI, TRUE);
++	(void)sweet_log_sync();
+ 	gpu_wr(gpu_gmu, GMU_HFI_CTRL_INIT, 1);
+ 	printf("SWEET GPU: hfi init store done\n");
+ 	(void)sweet_log_sync();

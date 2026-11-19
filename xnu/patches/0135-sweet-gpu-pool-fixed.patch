@@ -1,0 +1,66 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -2619,6 +2619,47 @@
+ 	return (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1u);
+ }
+ 
++/*
++ * A boot argument can name the pool outright. The ADT on this port is built
++ * with --highmem, so the kernel only manages DDR above 4 GiB and
++ * kmem_alloc_contig can never satisfy the GMU's 32-bit address window. A
++ * low-bank address the kernel never sees is the way to hand the CM3 memory;
++ * the shim leaves the range between the cdsp secure carve-out ending at
++ * 0xa1600000 and the dump region at 0xaf000000 untouched.
++ */
++static bool
++gpu_gmu_pool_fixed(uint32_t pa)
++{
++	if (pa < 0x80000000u || (pa & (PAGE_SIZE - 1)) ||
++	    (uint64_t)pa + GMU_POOL_BYTES > 0x100000000ull) {
++		printf("SWEET GPU: full pool pa %#x is not page-aligned DDR below"
++		    " 4 GiB\n", pa);
++		return false;
++	}
++	printf("SWEET GPU: full pool fixed pa=%#x bytes=%#x\n", pa,
++	    GMU_POOL_BYTES);
++	(void)sweet_log_sync();
++	gpu_pool = (volatile uint32_t *)ml_io_map(pa, GMU_POOL_BYTES);
++	if (!gpu_pool) {
++		printf("SWEET GPU: full pool: %#x did not map\n", pa);
++		return false;
++	}
++	/* The mapping is uncached, so this lands in memory as written. */
++	bzero((char *)gpu_pool, GMU_POOL_BYTES);
++	gpu_pool_wr(0xfffcu, 0xa5a5a5a5u);
++	if (gpu_pool_rd(0xfffcu) != 0xa5a5a5a5u) {
++		printf("SWEET GPU: full pool pa %#x did not hold the test word\n",
++		    pa);
++		gpu_pool = NULL;
++		return false;
++	}
++	gpu_pool_size = GMU_POOL_BYTES;
++	gpu_pool_pa = pa;
++	printf("SWEET GPU: full pool zeroed (uncached)\n");
++	(void)sweet_log_sync();
++	return true;
++}
++
+ static bool
+ gpu_gmu_pool_alloc(void)
+ {
+@@ -2629,10 +2670,15 @@
+ 	ppnum_t max_pnum = gpu_pool_max_pnum();
+ 	kern_return_t kr;
+ 	unsigned i;
++	uint32_t fixed_pa = 0;
+ 
+ 	if (gpu_pool) {
+ 		return true;
+ 	}
++	if (PE_parse_boot_argn("gpu_pool", &fixed_pa, sizeof(fixed_pa)) &&
++	    fixed_pa) {
++		return gpu_gmu_pool_fixed(fixed_pa);
++	}
+ 	/* Every step prints before it runs: the 0131 boot died inside this
+ 	 * function without a panic string, so the last line is the evidence.
+ 	 * The full size is tried first; with 16 KiB pages the low window is

@@ -1,0 +1,120 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -26,9 +26,14 @@
+  * does the CM3 come out of reset. HFI queues, SMMU, and command submission are
+  * still absent; the only rail vote is gfx.lvl over the RPMh ARC path in
+  * sweet_rpmh.c. See gpu-report.md.
+- * 0099 adds the CM3_CFG=0x4052 reset the vendor writes before starting: with
+- * the snapshot NMI bit set the CM3 boots into the NMI handler instead of
+- * __main, and our 0098 boot died exactly that way.
++ * 0099 tried the CM3_CFG=0x4052 write newer msm trees use before starting;
++ * log37 shows the register reads 0x52 before and after, so that bit is not
++ * writable here and the NMI theory was wrong. 0100 clears the GBIF halt the
++ * vendor clears in a6xx_gmu_start(), reports gpu_cc_gmu_clk_src (0x1120, the
++ * parent both GMU branches hang off; it reads 0/0, never configured), and
++ * splits the release with markers: a delay, an RBBM read and then the GMU
++ * read, so the next log says whether the CM3 itself or our first register
++ * access after release is what stalls the bus.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -74,8 +79,12 @@
+ #define GPUCC_GX_DOMAIN         0x1508u
+ #define GPUCC_CX_GDSCR_STATUS   0x1540u
+ #define GPUCC_GMU_RCG           0x1120u
++#define GPUCC_GMU_RCG_CFG       0x1124u
+ #define GPUCC_PLL0              0x0u
+ 
++/* GPU block words, byte offsets into the 0x40000 3d0 mapping. */
++#define GBIF_HALT               (0x3c45u << 2)
++#define GBIF_HALT_ACK           (0x3c46u << 2)
+ /*
+  * GMU block (0x31000 aperture). a6xx_reg.h gives these as word offsets in the
+  * GPU register space; kgsl's gmu_core_regread() subtracts
+@@ -91,7 +100,6 @@
+ #define GMU_CM3_FW_BUSY         GMU_REG(0x1f81au)
+ #define GMU_CM3_FW_INIT_RESULT  GMU_REG(0x1f81cu)
+ #define GMU_CM3_CFG             GMU_REG(0x1f82du)
+-#define GMU_CM3_CFG_RESET       0x4052u
+ #define GMU_CM3_ITCM            GMU_REG(0x1b400u)
+ #define GMU_CM3_DTCM            GMU_REG(0x1c400u)
+ #define GMU_FW_INIT_DONE        0xbabefaceu
+@@ -1576,6 +1584,48 @@
+  * no GMU SMMU mapping yet, and firmware should reach the init result before it
+  * touches either buffer.
+  */
++/*
++ * The two host-side duties a6xx_gmu_start() performs before releasing the CM3
++ * that this probe still lacks: clear A6XX_GBIF_HALT (the reset sequence can
++ * leave the GPU's bus interface halted, and the GDSC power-up does not always
++ * release it) and give gpu_cc_gmu_clk_src a source. 0x1120 is the parent of
++ * both gpu_cc_cx_gmu_clk and gpu_cc_gx_gmu_clk and reads back 0/0, i.e. never
++ * configured; without a registered source the CM3 only has whatever the
++ * bootloader left. TCXO (19.2 MHz) is slow but is the one parent that needs
++ * no other block to be running.
++ */
++static void
++gpu_gmu_prestart(void)
++{
++	uint32_t halt = gpu_rd(gpu_core, GBIF_HALT);
++
++	printf("SWEET GPU: prestart gbif halt=%#x ack=%#x gmu_clk_src=%#x/%#x\n",
++	    halt, gpu_rd(gpu_core, GBIF_HALT_ACK), gpu_rd(gpu_cc, GPUCC_GMU_RCG),
++	    gpu_rd(gpu_cc, GPUCC_GMU_RCG_CFG));
++	if (halt != 0) {
++		gpu_wr(gpu_core, GBIF_HALT, 0);
++		delay(1);
++		printf("SWEET GPU: gbif halt now %#x ack=%#x\n",
++		    gpu_rd(gpu_core, GBIF_HALT), gpu_rd(gpu_core, GBIF_HALT_ACK));
++	}
++	if (gpu_rd(gpu_cc, GPUCC_GMU_RCG) & RCG_ROOT_OFF) {
++		gpu_wr(gpu_cc, GPUCC_GMU_RCG_CFG, RCG_CFG_XO);
++		gpu_wr(gpu_cc, GPUCC_GMU_RCG, RCG_UPDATE);
++		delay(1);
++		gpu_wr(gpu_cc, GPUCC_GMU_RCG, RCG_ROOT_EN);
++		for (unsigned i = 0; i < 100; ++i) {
++			if (!(gpu_rd(gpu_cc, GPUCC_GMU_RCG) & RCG_ROOT_OFF)) {
++				break;
++			}
++			delay(1);
++		}
++		printf("SWEET GPU: gmu_clk_src now %#x/%#x cx-gmu=%#x gx-gmu=%#x\n",
++		    gpu_rd(gpu_cc, GPUCC_GMU_RCG), gpu_rd(gpu_cc, GPUCC_GMU_RCG_CFG),
++		    gpu_rd(gpu_cc, GPUCC_CX_GMU_CBCR),
++		    gpu_rd(gpu_cc, GPUCC_GX_GMU_CBCR));
++	}
++}
++
+ static bool
+ gpu_gmu_boot_try(void)
+ {
+@@ -1603,16 +1653,24 @@
+ 	gpu_wr(gpu_gmu, GMU_CM3_FW_INIT_RESULT, 0);
+ 	gpu_wr(gpu_gmu, GMU_CM3_BOOT_CONFIG, 0);
+ 	gpu_wr(gpu_gmu, GMU_AHB_FENCE_RANGE_0, GMU_FENCE_RANGE_MASK);
+-	/*
+-	 * Snapshot/NMI left in CM3_CFG makes the CM3 boot straight into the NMI
+-	 * handler instead of __main; kgsl resets it to its power-on value.
+-	 */
+-	gpu_wr(gpu_gmu, GMU_CM3_CFG, GMU_CM3_CFG_RESET);
+ 	gpu_wr(gpu_gmu, GMU_HFI_SFR_ADDR, 0x06018000u);
++	gpu_gmu_prestart();
+ 	printf("SWEET GPU: gmu preset done, cm3-cfg=%#x sfr=%#x, releasing cm3\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_CFG), gpu_rd(gpu_gmu, GMU_HFI_SFR_ADDR));
+ 	gpu_wr(gpu_gmu, GMU_CX_GMU_WFI_CONFIG, 0);
+ 	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
++	/*
++	 * No GMU register is touched for 20 ms after the release: if the CM3
++	 * itself takes the bus down, this marker is the last thing in the log
++	 * and the failure is in the firmware, not in our polling.
++	 */
++	delay(20);
++	printf("SWEET GPU: cm3 released 20 ms ago, no gmu read yet\n");
++	printf("SWEET GPU: post-release rbbm=%#x\n", gpu_core_rev());
++	printf("SWEET GPU: post-release gmu fw-init=%#x busy=%#x reset=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT),
++	    gpu_rd(gpu_gmu, GMU_CM3_FW_BUSY),
++	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
+ 	uint32_t init = 0;
+ 	unsigned i;
+ 	for (i = 0; i < 100; ++i) {

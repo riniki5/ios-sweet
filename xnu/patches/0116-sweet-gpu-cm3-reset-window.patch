@@ -1,0 +1,82 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -165,6 +165,17 @@
+  * clock framework would have turned on before a clk_set_rate(). 0115 does
+  * both: enable the GCC branch, then program the mux from sweet_gpu_init()
+  * while the GMU branch is still off, vendor gmu_enable_clks() order.
++ * 0115 survives and the mux reads back 0x602/rooted (log59), but the CM3
++ * still never fetches: no sentinel, fw-init 0, and the worker's post-store
++ * lines are missing. Ticks in log59 place the release at ~tick 42 and MACH
++ * Reboot at ~54, so the worker's 2000 ms poll was due after the reboot wedge
++ * - the evidence was lost, not the read. 0116 therefore (a) has the boot
++ * thread wait out the whole worker with 500 ms markers, (b) re-asserts
++ * CM3_SYSRESET, writes CM3_CFG = 0x4052 in that window and reads it back
++ * (mainline's NMI guard, dropped in 0100 after log37), and (c) prints the
++ * two state words mainline a6xx_gmu_start() consults before releasing the
++ * core: DTCM 0xff8 (which init value to expect: 0xBABEFACE or 0x100) and
++ * GENERAL_7 (TCM retention), plus FW_BUSY samples during the poll.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -1944,6 +1955,29 @@
+ 
+ 	printf("SWEET GPU: xrel thread up\n");
+ 	gpu_pause(200);
++	/* mainline a6xx_gmu_start() reads DTCM 0xff8 to pick the value it waits
++	 * for: 0xBABEFACE on old GMUs, 0x100 (masked 0x1ff) on new ones. The
++	 * selector is read from the firmware image's own DTCM word. */
++	printf("SWEET GPU: xrel state dtcm-ff8=%#x gen7=%#x cm3-cfg=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_CM3_DTCM + 0xff8),
++	    gpu_rd(gpu_gmu, GMU_GENERAL_7),
++	    gpu_rd(gpu_gmu, GMU_CM3_CFG));
++	gpu_pause(100);
++	/* Vendor and mainline both assert the CM3 reset before their last writes
++	 * instead of trusting what ABL left, then clear it. ABL leaves it at 1, so
++	 * this only re-asserts a known state - but it also lets CM3_CFG be written
++	 * in the same window mainline uses. 0100 dropped that write after log37
++	 * showed bit 14 not sticking; the readback below says whether 0x52 is the
++	 * register's answer or whether the write was simply ignored. */
++	printf("SWEET GPU: xrel assert reset\n");
++	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 1);
++	gpu_pause(20);
++	printf("SWEET GPU: xrel reset now %#x\n",
++	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
++	gpu_wr(gpu_gmu, GMU_CM3_CFG, 0x4052);
++	printf("SWEET GPU: xrel cm3-cfg now %#x\n",
++	    gpu_rd(gpu_gmu, GMU_CM3_CFG));
++	gpu_pause(100);
+ 	printf("SWEET GPU: xrel issuing sysreset=0\n");
+ 	gpu_pause(100);
+ 	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
+@@ -1956,6 +1990,14 @@
+ 			    (i + 1) * 100);
+ 			break;
+ 		}
++		if ((i + 1) % 5 == 0) {
++			/* A core that runs but never stores the init result shows up
++			 * here; a core that never fetches keeps both at 0. */
++			printf("SWEET GPU: xrel poll %d ms busy=%#x cfg=%#x\n",
++			    (i + 1) * 100,
++			    gpu_rd(gpu_gmu, GMU_CM3_FW_BUSY),
++			    gpu_rd(gpu_gmu, GMU_CM3_CFG));
++		}
+ 	}
+ 	if (!val) {
+ 		printf("SWEET GPU: xrel fw-init stayed 0 for 2000 ms\n");
+@@ -2179,7 +2221,15 @@
+ 			thread_deallocate(th);
+ 			printf("SWEET GPU: xrel dealloc returned\n");
+ 		}
+-		gpu_pause(800);
++		/* log59: the worker's 2 s poll was cut off because this thread went
++		 * on to the ladder and gpu_reboot 1.2 s after the store, so the one
++		 * piece of evidence that mattered never reached the ring. Wait out
++		 * the whole worker (poll + four follow-up reads) with visible ticks. */
++		for (int w = 0; w < 8; w++) {
++			gpu_pause(500);
++			printf("SWEET GPU: xrel main alive %d ms after start\n",
++			    (w + 1) * 500);
++		}
+ 		printf("SWEET GPU: xrel main alive after release window\n");
+ 		gpu_pause(300);
+ 		return false;

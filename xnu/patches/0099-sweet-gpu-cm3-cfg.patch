@@ -1,0 +1,54 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -26,6 +26,9 @@
+  * does the CM3 come out of reset. HFI queues, SMMU, and command submission are
+  * still absent; the only rail vote is gfx.lvl over the RPMh ARC path in
+  * sweet_rpmh.c. See gpu-report.md.
++ * 0099 adds the CM3_CFG=0x4052 reset the vendor writes before starting: with
++ * the snapshot NMI bit set the CM3 boots into the NMI handler instead of
++ * __main, and our 0098 boot died exactly that way.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -87,6 +90,8 @@
+ #define GMU_CX_GMU_WFI_CONFIG   GMU_REG(0x1f802u)
+ #define GMU_CM3_FW_BUSY         GMU_REG(0x1f81au)
+ #define GMU_CM3_FW_INIT_RESULT  GMU_REG(0x1f81cu)
++#define GMU_CM3_CFG             GMU_REG(0x1f82du)
++#define GMU_CM3_CFG_RESET       0x4052u
+ #define GMU_CM3_ITCM            GMU_REG(0x1b400u)
+ #define GMU_CM3_DTCM            GMU_REG(0x1c400u)
+ #define GMU_FW_INIT_DONE        0xbabefaceu
+@@ -1578,14 +1583,15 @@
+ 		return false;
+ 	}
+ 	printf("SWEET GPU: gmu pre-boot reset=%#x boot-cfg=%#x wfi=%#x"
+-	    " qtbl=%#x/%#x log=%#x sfr=%#x\n",
++	    " qtbl=%#x/%#x log=%#x sfr=%#x cm3-cfg=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET),
+ 	    gpu_rd(gpu_gmu, GMU_CM3_BOOT_CONFIG),
+ 	    gpu_rd(gpu_gmu, GMU_CX_GMU_WFI_CONFIG),
+ 	    gpu_rd(gpu_gmu, GMU_HFI_QTBL_ADDR),
+ 	    gpu_rd(gpu_gmu, GMU_HFI_QTBL_INFO),
+ 	    gpu_rd(gpu_gmu, GMU_PWR_COL_CP_MSG),
+-	    gpu_rd(gpu_gmu, GMU_HFI_SFR_ADDR));
++	    gpu_rd(gpu_gmu, GMU_HFI_SFR_ADDR),
++	    gpu_rd(gpu_gmu, GMU_CM3_CFG));
+ 	gpu_wr(gpu_gmu, GMU_GENERAL_7, 1);
+ 	if (!gpu_gmu_load_fw()) {
+ 		printf("SWEET GPU: gmu image did not stick, CM3 left in reset\n");
+@@ -1597,7 +1603,14 @@
+ 	gpu_wr(gpu_gmu, GMU_CM3_FW_INIT_RESULT, 0);
+ 	gpu_wr(gpu_gmu, GMU_CM3_BOOT_CONFIG, 0);
+ 	gpu_wr(gpu_gmu, GMU_AHB_FENCE_RANGE_0, GMU_FENCE_RANGE_MASK);
++	/*
++	 * Snapshot/NMI left in CM3_CFG makes the CM3 boot straight into the NMI
++	 * handler instead of __main; kgsl resets it to its power-on value.
++	 */
++	gpu_wr(gpu_gmu, GMU_CM3_CFG, GMU_CM3_CFG_RESET);
+ 	gpu_wr(gpu_gmu, GMU_HFI_SFR_ADDR, 0x06018000u);
++	printf("SWEET GPU: gmu preset done, cm3-cfg=%#x sfr=%#x, releasing cm3\n",
++	    gpu_rd(gpu_gmu, GMU_CM3_CFG), gpu_rd(gpu_gmu, GMU_HFI_SFR_ADDR));
+ 	gpu_wr(gpu_gmu, GMU_CX_GMU_WFI_CONFIG, 0);
+ 	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
+ 	uint32_t init = 0;

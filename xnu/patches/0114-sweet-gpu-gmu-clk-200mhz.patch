@@ -1,0 +1,49 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -147,6 +147,16 @@
+  * the CM3 to boot the cached DRAM image every time, so the stub and the real
+  * firmware at ITCM 0 were never the boot image. 0113 writes TCM_BOOT and
+  * prints boot-cfg after the write.
++ * log57 (0113, stub 2): `boot-cfg 0x2 fence-range0 0x80a008a0` sticks, the
++ * worker's release returns, the main thread survives the window - and
++ * FW_INIT_RESULT still stays 0 for 2000 ms with no sentinel. So the boot
++ * config was necessary but not sufficient. The next vendor divergence is the
++ * GMU clock rate: mainline sets core_clk to 200 MHz before enabling the GMU
++ * clocks ("use a known rate to bring up the GMU") and the vendor takes
++ * gmu-pwrlevels index 1 = 200 MHz (0xbebc200 in the toco DTB), while this
++ * driver had gmu_clk_src rooted on TCXO 19.2 MHz. 0114 re-roots it on
++ * P_GPLL0_OUT_MAIN_DIV (parent 6) with the 1.5 hidden divider (pre_div 2) and
++ * prints the mux readback.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -336,6 +346,9 @@
+ #define RCG_CFG_XO       (RCG_CFG_SRC(0) | RCG_CFG_DIV(1))
+ #define RCG_CFG_CRC_DIV  (RCG_CFG_SRC(1) | RCG_CFG_DIV(1)) /* gpu_cc_parent_map_2 */
+ #define RCG_CFG_GPLL0    (RCG_CFG_SRC(5) | RCG_CFG_DIV(1)) /* src 5 = GPLL0_MAIN */
++/* gpu_cc_parent_map_0 src 6 = P_GPLL0_OUT_MAIN_DIV; ftbl 200 MHz entry is
++ * F(200000000, P_GPLL0_OUT_MAIN_DIV, 1.5) -> pre_div = 2*1.5-1 = 2. */
++#define RCG_CFG_GPLL0_DIV200 (RCG_CFG_SRC(6) | RCG_CFG_DIV(2))
+ 
+ static vm_offset_t gpu_cc, gpu_gcc, gpu_core, gpu_gmu, gpu_smmu;
+ static volatile uint32_t *gpu_pdc_cfg, *gpu_pdc_seq;
+@@ -1840,8 +1853,17 @@
+ 			gpu_pause(300);
+ 		}
+ 	}
+-	if (clk && ((rcg & RCG_ROOT_OFF) || !(rcg & RCG_ROOT_EN))) {
+-		gpu_wr(gpu_cc, GPUCC_GMU_RCG_CFG, RCG_CFG_XO);
++	if (clk) {
++		/* log57: boot-cfg 0x2 stuck but the CM3 still did not fetch, so the
++		 * next divergence is the rate. Mainline "uses a known rate to bring up
++		 * the GMU" (a6xx_gmu_resume: clk_set_rate(core_clk, 200 MHz)) and the
++		 * vendor takes DEFAULT_GMU_FREQ_IDX 1 = 200 MHz from the toco DTB's
++		 * gmu-pwrlevels; this driver had the mux rooted on TCXO (19.2 MHz).
++		 * Parent 6 is P_GPLL0_OUT_MAIN_DIV, whose 1.5 divider is pre_div 2 in
++		 * the rcg2 encoding (rate = parent * 2 / (pre_div + 1)). */
++		printf("SWEET GPU: gmu_clk_src %#x/%#x -> GPLL0_DIV 200 MHz\n",
++		    rcg, cfg);
++		gpu_wr(gpu_cc, GPUCC_GMU_RCG_CFG, RCG_CFG_GPLL0_DIV200);
+ 		gpu_wr(gpu_cc, GPUCC_GMU_RCG, RCG_UPDATE);
+ 		delay(1);
+ 		gpu_wr(gpu_cc, GPUCC_GMU_RCG, RCG_ROOT_EN);

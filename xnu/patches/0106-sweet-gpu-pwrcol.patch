@@ -1,0 +1,99 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -66,7 +66,15 @@
+  * a 10 s cadence, so the wall has always been here. 0105 puts a marker and a
+  * pause before each of the two release writes; log46 names whichever one
+  * wedges: the WFI clear, the SYSRESET clear, or the CM3 taking the bus down
+- * once it starts.
++ * once it starts. log46 answers it: "wfi cleared", then "releasing cm3:
++ * sysreset=0", then nothing from the boot thread while ticks, vsync and the
++ * flush counter keep running - the CM3_SYSRESET store (or the pause after it)
++ * hangs that one CPU; the rest of the machine is fine. log47 (0105 with
++ * gpu_gmuclk=1) was a no-op because the clock block is gated on RCG_ROOT_OFF
++ * and the mux reads 0x0, so 0106 fixes that condition, prints right after the
++ * SYSRESET store to separate a wedged write from a wedged pause, and adds an
++ * opt-in (gpu_pwrcol=1) vendor power_config: PWR_COL_INTER_FRAME_CTRL =
++ * 0x9C40400 and the six RPMh client enables in A6XX_GMU_RPMH_CTRL.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -149,6 +157,16 @@
+ #define GMU_FENCE_RANGE_MASK    0x802808a0u
+ #define GMU_SPTPRAC_PWR_STATUS  GMU_REG(0x1f8d0u)
+ #define GMU_RPMH_POWER_STATE    GMU_REG(0x1f8ecu)
++#define GMU_PWR_COL_IFC         GMU_REG(0x1f8c0u)
++#define GMU_RPMH_CTRL           GMU_REG(0x1f8e8u)
++/*
++ * a6xx_gmu.xml.h: RPMH_INTERFACE=1, LLC=0x10, DDR=0x100, MX=0x200,
++ * CX=0x400, GFX=0x800. The inter-frame base value is the vendor write; the
++ * idle-level extras (IFPC/HM collapse/SPTPRAC) are left out because this
++ * platform's idle level is unknown.
++ */
++#define GMU_RPMH_ENABLE_MASK    0xf11u
++#define GMU_IFC_BASE            0x9c40400u
+ #define GMU_HFI_CTRL_STATUS     GMU_REG(0x1f980u)
+ #define GMU_GX_SPTPRAC_CTRL     GMU_REG(0x1a881u)
+ #define GMU_AO_HOST_INTR_STATUS GMU_REG(0x23b05u)
+@@ -1643,14 +1661,19 @@
+  * Both are opt-in (gpu_gbif=1, gpu_gmuclk=1) because 0100's unconditional GBIF
+  * read killed the kernel before it could log again, and the GPUCC read stays
+  * free: this block is already read all over gpu_gmu_report().
++ * gpu_pwrcol=1 adds the two a6xx_gmu_power_config() writes that need no
++ * buffers: the inter-frame power-collapse base value and the RPMh client
++ * enables. Without them the CM3 may wait on an RPMh sequencer that the power
++ * config never armed.
+  */
+ static void
+ gpu_gmu_prestart(void)
+ {
+-	int gbif = 0, clk = 0;
++	int gbif = 0, clk = 0, pc = 0;
+ 
+ 	PE_parse_boot_argn("gpu_gbif", &gbif, sizeof(gbif));
+ 	PE_parse_boot_argn("gpu_gmuclk", &clk, sizeof(clk));
++	PE_parse_boot_argn("gpu_pwrcol", &pc, sizeof(pc));
+ 	/* Print, sleep, read, print, sleep: the sleep is longer than the log
+ 	 * thread's flush period, so a marker survives a hang in the access that
+ 	 * follows it and the log names the fatal register. */
+@@ -1676,7 +1699,7 @@
+ 			gpu_pause(300);
+ 		}
+ 	}
+-	if (clk && (rcg & RCG_ROOT_OFF)) {
++	if (clk && ((rcg & RCG_ROOT_OFF) || !(rcg & RCG_ROOT_EN))) {
+ 		gpu_wr(gpu_cc, GPUCC_GMU_RCG_CFG, RCG_CFG_XO);
+ 		gpu_wr(gpu_cc, GPUCC_GMU_RCG, RCG_UPDATE);
+ 		delay(1);
+@@ -1692,6 +1715,20 @@
+ 		    gpu_rd(gpu_cc, GPUCC_CX_GMU_CBCR),
+ 		    gpu_rd(gpu_cc, GPUCC_GX_GMU_CBCR));
+ 	}
++	if (pc) {
++		uint32_t rpmh = gpu_rd(gpu_gmu, GMU_RPMH_CTRL);
++
++		printf("SWEET GPU: pwrcol before ifc=%#x rpmh=%#x\n",
++		    gpu_rd(gpu_gmu, GMU_PWR_COL_IFC), rpmh);
++		gpu_pause(300);
++		gpu_wr(gpu_gmu, GMU_PWR_COL_IFC, GMU_IFC_BASE);
++		gpu_wr(gpu_gmu, GMU_RPMH_CTRL, rpmh | GMU_RPMH_ENABLE_MASK);
++		delay(1);
++		printf("SWEET GPU: pwrcol after ifc=%#x rpmh=%#x\n",
++		    gpu_rd(gpu_gmu, GMU_PWR_COL_IFC),
++		    gpu_rd(gpu_gmu, GMU_RPMH_CTRL));
++		gpu_pause(300);
++	}
+ }
+ 
+ static bool
+@@ -1735,6 +1772,11 @@
+ 	printf("SWEET GPU: releasing cm3: sysreset=0\n");
+ 	gpu_pause(400);
+ 	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
++	/* log46 ended on the "sysreset=0" marker, so print again the moment the
++	 * store returns: a missing line means the AHB write wedged, a present one
++	 * means the CM3 took the core down right after accepting the release. */
++	printf("SWEET GPU: sysreset=0 store returned\n");
++	gpu_pause(300);
+ 	/*
+ 	 * No GMU register is touched for 20 ms after the release: if the CM3
+ 	 * itself takes the bus down, this marker is the last thing in the log

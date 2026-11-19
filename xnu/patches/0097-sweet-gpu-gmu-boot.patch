@@ -1,0 +1,83 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -17,6 +17,10 @@
+  * 0096 drives A6XX_GMU_GX_SPTPRAC_POWER_CONTROL itself: the GMU reports the GX
+  * GDSC up but GX_CLK_OFF set, and SPTPRAC is what keeps the GPU clock domain
+  * off while the CM3 is still in reset.
++ * 0097 releases the CM3 reset: the 0096 SPTPRAC write was dropped (the control
++ * register reads back zero), the stock DT makes core_root_clk part of the GX
++ * GDSC, and the bootloader had this GPU lit, so its GMU image may still sit in
++ * TCM and the CM3 can be started exactly as a6xx_gmu_start() does it.
+  * No GPU firmware, HFI, SMMU, or command submission; register reads only after
+  * the domain reports powered. The only rail vote is gfx.lvl over the RPMh ARC
+  * path in sweet_rpmh.c. See gpu-report.md.
+@@ -77,7 +81,12 @@
+ #define GMU_REG(w)         (((w) - GMU_GMU2GPU_WORDS) * 4u)
+ 
+ #define GMU_CM3_SYSRESET        GMU_REG(0x1f800u)
++#define GMU_CM3_BOOT_CONFIG     GMU_REG(0x1f801u)
++#define GMU_CX_GMU_WFI_CONFIG   GMU_REG(0x1f802u)
+ #define GMU_CM3_FW_INIT_RESULT  GMU_REG(0x1f81cu)
++#define GMU_CM3_ITCM            GMU_REG(0x1b400u)
++#define GMU_CM3_DTCM            GMU_REG(0x1c400u)
++#define GMU_FW_INIT_DONE        0xbabefaceu
+ #define GMU_SPTPRAC_PWR_STATUS  GMU_REG(0x1f8d0u)
+ #define GMU_RPMH_POWER_STATE    GMU_REG(0x1f8ecu)
+ #define GMU_HFI_CTRL_STATUS     GMU_REG(0x1f980u)
+@@ -483,6 +492,48 @@
+ 	gpu_dump_at(gpu_core, what, off, words);
+ }
+ 
++/*
++ * a6xx_gmu_start() is three writes: clear CX_GMU_WFI_CONFIG, set
++ * CM3_BOOT_CONFIG to TCM boot, release CM3_SYSRESET and wait 100 ms for
++ * CM3_FW_INIT_RESULT to become 0xBABEFACE. The bootloader lit the splash on
++ * this GPU, so its GMU image may still be in TCM; if so the CM3 starts here
++ * and SPTPRAC becomes software-drivable the way kgsl does it.
++ */
++static bool
++gpu_gmu_boot_try(void)
++{
++	if (!gpu_gmu || !gpu_gmu_live) {
++		return false;
++	}
++	gpu_dump_at(gpu_gmu, "itcm", GMU_CM3_ITCM, 4);
++	gpu_dump_at(gpu_gmu, "dtcm", GMU_CM3_DTCM, 4);
++	printf("SWEET GPU: gmu boot-cfg=%#x wfi=%#x reset=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_CM3_BOOT_CONFIG),
++	    gpu_rd(gpu_gmu, GMU_CX_GMU_WFI_CONFIG),
++	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
++	gpu_wr(gpu_gmu, GMU_CX_GMU_WFI_CONFIG, 0);
++	gpu_wr(gpu_gmu, GMU_CM3_BOOT_CONFIG, 0);
++	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
++	uint32_t init = 0;
++	unsigned i;
++	for (i = 0; i < 100; ++i) {
++		init = gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT);
++		if (init == GMU_FW_INIT_DONE) {
++			break;
++		}
++		delay(1);
++	}
++	printf("SWEET GPU: gmu cm3 released, %u ms in fw-init=%#x hfi=%#x reset=%#x\n",
++	    i, init, gpu_rd(gpu_gmu, GMU_HFI_CTRL_STATUS),
++	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
++	if (init == GMU_FW_INIT_DONE) {
++		return true;
++	}
++	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 1);
++	printf("SWEET GPU: gmu did not boot, TCM has no image, CM3 back in reset\n");
++	return false;
++}
++
+ void
+ sweet_gpu_init(void)
+ {
+@@ -659,6 +710,7 @@
+ 	 */
+ 	gpu_gmu_fence_allow("gx-on");
+ 	gpu_gmu_report("gx-on");
++	gpu_gmu_boot_try();
+ 	gpu_sptprac_on();
+ 	printf("SWEET GPU: gmu_rcg cmd=%#x cfg=%#x branch=%#x\n",
+ 	    gpu_rd(gpu_cc, GPUCC_GMU_RCG), gpu_rd(gpu_cc, GPUCC_GMU_RCG + 4),

@@ -1,0 +1,476 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -209,9 +209,13 @@
+ #include <sys/reboot.h>
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern int hz;
+ extern int sweet_rpmh_arc_probe(const char *res);
+ extern int sweet_rpmh_arc_raise(const char *res, unsigned target);
+@@ -329,6 +333,13 @@
+ #define GMU_RSCC_TCS_DATA       GMU_REG(0x2340eu)
+ #define GMU_RSCC_OVERRIDE_ADDR  GMU_REG(0x23500u)
+ #define GMU_RSCC_SEQ_MEM        GMU_REG(0x23580u)
++/* The control handshake a6xx_gmu_start() runs around the RSC: stop before the
++ * CM3 image, wake after GENERAL_7. 0x23404 is RSCC_SEQ_BUSY_DRV0 in the
++ * reference, a different register from GMU_RSCC_STATUS0 above. */
++#define GMU_RSCC_CONTROL_REQ    GMU_REG(0x23b07u)  /* 0x24c1c */
++#define GMU_RSCC_CONTROL_ACK    GMU_REG(0x23b08u)  /* 0x24c20 */
++#define GMU_RSCC_SEQ_BUSY       GMU_REG(0x23501u)  /* 0x23404 */
++#define GMU_RSC_STATUS0_POWERED_OFF (1u << 16)
+ #define RSC_CMD_OFFSET  2u
+ #define PDC_CMD_OFFSET  4u
+ /* a6xx_reg.h PDC word offsets; _regwrite() in the vendor tree shifts by 2. */
+@@ -367,6 +378,42 @@
+ #define GMU_GX_CLK_OFF          (1u << 7)
+ #define GMU_SPTPRAC_ON_CTRL     0x00778000u
+ #define GMU_SPTPRAC_ON_STATUS   (1u << 3)
++#define GMU_PWR_COL_CP_RESP     GMU_REG(0x1f901u)  /* 0x14404 */
++
++/*
++ * The host memory the firmware expects. Trogdor's A618 startup hands the GMU
++ * one pool: the HFI queue table and its two queues, the log, and the tables a
++ * real stage-1 mapping would need. The GMU's address registers are 32-bit, so
++ * every address below must come from physical memory below 4 GiB.
++ * Offsets match the reference (a6xx_hfi.c legacy): table at +0xc000, one
++ * 4 KiB command queue at +0xd000, the response queue at +0xe000.
++ */
++#define GMU_POOL_BYTES          0x30000u
++#define GMU_POOL_LOG            0x8000u
++#define GMU_POOL_LOG_BYTES      0x4000u
++#define GMU_POOL_HFI            0xc000u
++#define GMU_POOL_HFI_BYTES      0x4000u
++#define GMU_POOL_MAX_PNUM       0xfffffu
++#define HFI_CMD_HEADER          (GMU_POOL_HFI + 24u)
++#define HFI_RSP_HEADER          (HFI_CMD_HEADER + 48u)
++#define HFI_CMD_DATA            (GMU_POOL_HFI + 0x1000u)
++#define HFI_RSP_DATA            (GMU_POOL_HFI + 0x2000u)
++#define HFI_QUEUE_WORDS         1024u
++/* PWR_COL_CP_MSG's low bits: the log is four 4 KiB pages, as Linux writes it. */
++#define GMU_CP_MESSAGE_PAGES    3u
++
++/* GPU SMMU GR0 words (SMMU-500); the bypass needs no context bank. */
++#define SMMU_GR0_SCR0           0x0u
++#define SMMU_GR0_SGFSR          0x48u
++#define SMMU_GR0_IDR0           0x20u
++#define SMMU_GR0_IDR1           0x24u
++#define SMMU_GR0_SMR            0x800u
++#define SMMU_GR0_S2CR           0xc00u
++#define SMMU_SCR0_CLIENTPD      (1u << 0)
++#define SMMU_SCR0_USFCFG        (1u << 10)
++#define SMMU_SMR_VALID          (1u << 31)
++#define SMMU_S2CR_TYPE          (3u << 16)
++#define SMMU_S2CR_BYPASS        (1u << 16)
+ 
+ /* Fabia alpha PLL (clk-alpha-pll.c: FABIA_* offsets). */
+ #define PLL_MODE                0x0u
+@@ -415,6 +462,11 @@
+ static volatile uint32_t *gpu_pdc_cfg, *gpu_pdc_seq;
+ static bool gpu_dead;
+ static bool gpu_gmu_live;
++/* 0131: the uncached alias of the GMU's host pool and its physical address. */
++static volatile uint32_t *gpu_pool;
++static uint32_t gpu_pool_pa;
++static bool gpu_full_ran;
++static bool gpu_full_ok;
+ 
+ static uint32_t
+ gpu_rd(vm_offset_t base, uint32_t off)
+@@ -2527,12 +2579,377 @@
+ 	    gpu_pdc_cfg[PDC_GPU_TCS1_CMD_ENABLE_BANK], gpu_pdc_seq[0]);
+ }
+ 
++/*
++ * 0131: the Trogdor A618 startup. Every earlier probe handed the CM3 an image
++ * and then read FW_INIT_RESULT; this one also gives it what the firmware uses
++ * before it posts that result: an HFI queue table, a log buffer, an address
++ * space (SMMU bypass, because toco's GMU stream id is not in the vendor DTS),
++ * the RSC stop/wake handshake, and the RPMh votes. Opt-in through gpu_full=1.
++ */
++static uint32_t
++gpu_pool_rd(uint32_t off)
++{
++	uint32_t v = gpu_pool[off / 4];
++
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++gpu_pool_wr(uint32_t off, uint32_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	gpu_pool[off / 4] = value;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static bool
++gpu_gmu_pool_alloc(void)
++{
++	vm_offset_t va = 0;
++	ppnum_t pn;
++
++	if (gpu_pool) {
++		return true;
++	}
++	if (kmem_alloc_contig(kernel_map, &va, GMU_POOL_BYTES, PAGE_MASK,
++	    GMU_POOL_MAX_PNUM, 0, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
++	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS || va == 0) {
++		printf("SWEET GPU: full pool: no contiguous %#x below 4 GiB\n",
++		    GMU_POOL_BYTES);
++		return false;
++	}
++	pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
++	if (!pn) {
++		printf("SWEET GPU: full pool: no page for va %#lx\n",
++		    (unsigned long)va);
++		return false;
++	}
++	gpu_pool_pa = (uint32_t)ptoa_64(pn);
++	/*
++	 * KMA_ZERO zeroed the pages through the cached kernel VA. Clean and
++	 * invalidate before the uncached alias takes over, or a dirty line can
++	 * later be evicted over something the GMU wrote.
++	 */
++	flush_dcache64((addr64_t)gpu_pool_pa, GMU_POOL_BYTES, TRUE);
++	gpu_pool = (volatile uint32_t *)ml_io_map(gpu_pool_pa, GMU_POOL_BYTES);
++	if (!gpu_pool) {
++		printf("SWEET GPU: full pool: %#x did not map\n", gpu_pool_pa);
++		return false;
++	}
++	printf("SWEET GPU: full pool va=%#lx pa=%#x bytes=%#x\n",
++	    (unsigned long)va, gpu_pool_pa, GMU_POOL_BYTES);
++	return true;
++}
++
++/*
++ * What stream the GMU uses on toco is not in the vendor device tree, so a
++ * stage-1 bank cannot be built from evidence yet. Bypass is the part of the
++ * SMMU setup that needs no stream id: unmatched streams stop faulting and every
++ * stream the bootloader matched is switched to bypass as well. The inventory
++ * printed here is what a later patch needs to build the real mapping.
++ */
++static void
++gpu_smmu_bypass(void)
++{
++	uint32_t idr0, idr1, scr0;
++	unsigned groups, valid = 0, shown = 0, n;
++
++	if (!gpu_smmu) {
++		printf("SWEET GPU: full smmu not mapped, no bypass\n");
++		return;
++	}
++	idr0 = gpu_rd(gpu_smmu, SMMU_GR0_IDR0);
++	idr1 = gpu_rd(gpu_smmu, SMMU_GR0_IDR1);
++	scr0 = gpu_rd(gpu_smmu, SMMU_GR0_SCR0);
++
++	printf("SWEET GPU: full smmu idr0=%#x idr1=%#x scr0=%#x scr1=%#x"
++	    " acr=%#x gbpa=%#x sgfsr=%#x\n", idr0, idr1, scr0,
++	    gpu_rd(gpu_smmu, 0x4), gpu_rd(gpu_smmu, 0x10),
++	    gpu_rd(gpu_smmu, 0x44), gpu_rd(gpu_smmu, SMMU_GR0_SGFSR));
++	gpu_pause(300);
++	if (idr0 == ~0u || idr1 == ~0u) {
++		printf("SWEET GPU: full smmu not answering, not touched\n");
++		return;
++	}
++	groups = idr0 & 0xffu;
++	if (groups > 64) {
++		groups = 64;
++	}
++	for (n = 0; n < groups; ++n) {
++		uint32_t smr = gpu_rd(gpu_smmu, SMMU_GR0_SMR + 4 * n);
++
++		if (!(smr & SMMU_SMR_VALID)) {
++			continue;
++		}
++		valid++;
++		if (shown++ < 8) {
++			uint32_t s2cr = gpu_rd(gpu_smmu, SMMU_GR0_S2CR + 4 * n);
++
++			printf("SWEET GPU: full smmu smr%u=%#x s2cr%u=%#x"
++			    " type=%u cb=%u\n", n, smr, n, s2cr,
++			    (s2cr >> 16) & 3u, s2cr & 0xffu);
++		}
++	}
++	printf("SWEET GPU: full smmu %u valid streams of %u groups\n", valid,
++	    idr0 & 0xffu);
++	gpu_pause(300);
++	if (scr0 & SMMU_SCR0_CLIENTPD) {
++		printf("SWEET GPU: full smmu client port disabled, not touched\n");
++		return;
++	}
++	if (scr0 & SMMU_SCR0_USFCFG) {
++		gpu_wr(gpu_smmu, SMMU_GR0_SCR0, scr0 & ~SMMU_SCR0_USFCFG);
++	}
++	for (n = 0; n < groups; ++n) {
++		uint32_t s2cr;
++
++		if (!(gpu_rd(gpu_smmu, SMMU_GR0_SMR + 4 * n) & SMMU_SMR_VALID)) {
++			continue;
++		}
++		s2cr = gpu_rd(gpu_smmu, SMMU_GR0_S2CR + 4 * n);
++		if ((s2cr & SMMU_S2CR_TYPE) != SMMU_S2CR_BYPASS) {
++			gpu_wr(gpu_smmu, SMMU_GR0_S2CR + 4 * n,
++			    (s2cr & ~SMMU_S2CR_TYPE) | SMMU_S2CR_BYPASS);
++		}
++	}
++	printf("SWEET GPU: full smmu bypass scr0=%#x gbpa=%#x sgfsr=%#x\n",
++	    gpu_rd(gpu_smmu, SMMU_GR0_SCR0), gpu_rd(gpu_smmu, 0x44),
++	    gpu_rd(gpu_smmu, SMMU_GR0_SGFSR));
++	gpu_pause(300);
++}
++
++static unsigned
++gpu_rsc_stop(const char *when)
++{
++	unsigned i;
++
++	gpu_wr(gpu_gmu, GMU_RSCC_CONTROL_REQ, 1);
++	for (i = 1; i <= 1000; ++i) {
++		if (gpu_rd(gpu_gmu, GMU_RSCC_STATUS0) & GMU_RSC_STATUS0_POWERED_OFF) {
++			break;
++		}
++		delay(1);
++	}
++	gpu_wr(gpu_gmu, GMU_RSCC_CONTROL_REQ, 0);
++	printf("SWEET GPU: full rsc stop %s status0=%#x polls=%u\n", when,
++	    gpu_rd(gpu_gmu, GMU_RSCC_STATUS0), i);
++	return i;
++}
++
++static bool
++gpu_rsc_start(void)
++{
++	unsigned i, j;
++
++	gpu_wr(gpu_gmu, GMU_RSCC_CONTROL_REQ, 2);
++	for (i = 1; i <= 1000; ++i) {
++		if ((gpu_rd(gpu_gmu, GMU_RSCC_CONTROL_ACK) & 2u) == 2u) {
++			break;
++		}
++		delay(1);
++	}
++	if (i > 1000) {
++		gpu_wr(gpu_gmu, GMU_RSCC_CONTROL_REQ, 0);
++		printf("SWEET GPU: full rsc wake no ack, ack=%#x\n",
++		    gpu_rd(gpu_gmu, GMU_RSCC_CONTROL_ACK));
++		return false;
++	}
++	for (j = 1; j <= 1000; ++j) {
++		if (gpu_rd(gpu_gmu, GMU_RSCC_SEQ_BUSY) == 0) {
++			break;
++		}
++		delay(1);
++	}
++	gpu_wr(gpu_gmu, GMU_RSCC_CONTROL_REQ, 0);
++	printf("SWEET GPU: full rsc wake ack=%u busy=%u seq-busy=%#x\n", i, j,
++	    gpu_rd(gpu_gmu, GMU_RSCC_SEQ_BUSY));
++	if (j > 1000) {
++		printf("SWEET GPU: full rsc sequence stayed busy\n");
++		return false;
++	}
++	return true;
++}
++
++static void
++gpu_hfi_queue(uint32_t header, uint32_t iova, uint32_t id)
++{
++	gpu_pool_wr(header, 1);                 /* status */
++	gpu_pool_wr(header + 4, iova);
++	gpu_pool_wr(header + 8, (10u << 8) | id);
++	gpu_pool_wr(header + 12, HFI_QUEUE_WORDS);
++	gpu_pool_wr(header + 24, 1);            /* rx watermark */
++	gpu_pool_wr(header + 28, 1);            /* tx watermark */
++	gpu_pool_wr(header + 32, 1);            /* rx request */
++}
++
++static void
++gpu_hfi_table(void)
++{
++	gpu_pool_wr(GMU_POOL_HFI, 0);
++	gpu_pool_wr(GMU_POOL_HFI + 4, 24 + 2 * 48);
++	gpu_pool_wr(GMU_POOL_HFI + 8, 24 >> 2);
++	gpu_pool_wr(GMU_POOL_HFI + 12, 48 >> 2);
++	gpu_pool_wr(GMU_POOL_HFI + 16, 2);
++	gpu_pool_wr(GMU_POOL_HFI + 20, 2);
++	/* With bypass the IOVA the firmware sees is the pool's physical
++	 * address: command id 0, response id 4, one 4 KiB queue each. */
++	gpu_hfi_queue(HFI_CMD_HEADER, gpu_pool_pa + HFI_CMD_DATA, 0);
++	gpu_hfi_queue(HFI_RSP_HEADER, gpu_pool_pa + HFI_RSP_DATA, 4);
++}
++
++/* Whatever the CM3 got, the host side goes back to how the probe found it. */
++static void
++gpu_full_undo(uint32_t votes_before, uint32_t general7_before, const char *why)
++{
++	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 1);
++	(void)gpu_rsc_stop(why);
++	gpu_wr(gpu_gmu, GMU_RPMH_CTRL, votes_before);
++	gpu_wr(gpu_gmu, GMU_GENERAL_7, general7_before);
++}
++
++static bool
++gpu_gmu_full_boot(void)
++{
++	uint32_t votes_before, general7_before, ver, mask, want, init = 0;
++	unsigned i;
++	bool ok;
++	int gsmmu = 1;
++
++	gpu_full_ran = true;
++	PE_parse_boot_argn("gpu_gsmmu", &gsmmu, sizeof(gsmmu));
++	if (!(gpu_rd(gpu_gmu, GMU_CM3_SYSRESET) & 1u)) {
++		printf("SWEET GPU: full: CM3 not held, nothing started\n");
++		return false;
++	}
++	votes_before = gpu_rd(gpu_gmu, GMU_RPMH_CTRL);
++	general7_before = gpu_rd(gpu_gmu, GMU_GENERAL_7);
++	printf("SWEET GPU: full begin votes=%#x general7=%#x gsmmu=%d t=%llu\n",
++	    votes_before, general7_before, gsmmu, gpu_uptime_ms());
++	(void)sweet_log_sync();
++	gpu_pause(300);
++	if (!gpu_gmu_pool_alloc()) {
++		printf("SWEET GPU: full stops without host memory\n");
++		return false;
++	}
++	if (gsmmu) {
++		gpu_smmu_bypass();
++	} else {
++		printf("SWEET GPU: full smmu left as the bootloader set it\n");
++	}
++	gpu_pause(300);
++	/* RSC program, then stop: the reference's order, before GENERAL_7 and
++	 * the wake, so the sequencer is idle when the CM3 starts on it. */
++	gpu_rpmh_ucode();
++	gpu_pause(300);
++	(void)gpu_rsc_stop("program");
++	gpu_pause(300);
++	gpu_wr(gpu_gmu, GMU_GENERAL_7, 1);
++	if (!gpu_rsc_start()) {
++		printf("SWEET GPU: full: no RSC wake, CM3 left in reset\n");
++		gpu_full_undo(votes_before, general7_before, "wake-fail");
++		return false;
++	}
++	gpu_pause(300);
++	printf("SWEET GPU: full loading tcm\n");
++	if (!gpu_gmu_load_fw()) {
++		printf("SWEET GPU: full: image did not stick\n");
++		gpu_full_undo(votes_before, general7_before, "load-fail");
++		return false;
++	}
++	gpu_wr(gpu_gmu, GMU_CM3_FW_INIT_RESULT, 0);
++	gpu_wr(gpu_gmu, GMU_CM3_BOOT_CONFIG, GMU_BOOT_TCM);
++	gpu_wr(gpu_gmu, GMU_CM3_CFG, 0x4052u);
++	gpu_wr(gpu_gmu, GMU_HFI_SFR_ADDR, 0x06018000u);
++	gpu_wr(gpu_gmu, GMU_AHB_FENCE_RANGE_0, GMU_FENCE_RANGE_MASK);
++	gpu_wr(gpu_gmu, GMU_SYS_BUS_CONFIG, 1);
++	gpu_wr(gpu_gmu, GMU_ICACHE_CONFIG, 1);
++	gpu_wr(gpu_gmu, GMU_DCACHE_CONFIG, 1);
++	gpu_wr(gpu_gmu, GMU_PWR_COL_IFC, GMU_IFC_BASE);
++	gpu_wr(gpu_gmu, GMU_RPMH_CTRL, votes_before | GMU_RPMH_ENABLE_MASK);
++	gpu_hfi_table();
++	gpu_wr(gpu_gmu, GMU_HFI_QTBL_ADDR, gpu_pool_pa + GMU_POOL_HFI);
++	gpu_wr(gpu_gmu, GMU_HFI_QTBL_INFO, 1);
++	gpu_wr(gpu_gmu, GMU_PWR_COL_CP_MSG,
++	    (gpu_pool_pa + GMU_POOL_LOG) | GMU_CP_MESSAGE_PAGES);
++	/*
++	 * The image's last DTCM word is the firmware version; a618_gmu.bin
++	 * leaves it zero, which selects the legacy init result (BABEFACE with
++	 * no mask) exactly as the reference's rule does.
++	 */
++	ver = gpu_rd(gpu_gmu, GMU_CM3_DTCM + 0xff8u * 4u);
++	mask = ver <= 0x20010004u ? ~0u : 0x1ffu;
++	want = ver <= 0x20010004u ? GMU_FW_INIT_DONE : 0x100u;
++	printf("SWEET GPU: full qtbl=%#x info=%#x cp-msg=%#x ver=%#x"
++	    " mask=%#x want=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_HFI_QTBL_ADDR),
++	    gpu_rd(gpu_gmu, GMU_HFI_QTBL_INFO),
++	    gpu_rd(gpu_gmu, GMU_PWR_COL_CP_MSG), ver, mask, want);
++	gpu_pause(300);
++	gpu_wr(gpu_gmu, GMU_CX_GMU_WFI_CONFIG, 0);
++	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 1);
++	gpu_wr(gpu_gmu, GMU_PWR_COL_CP_RESP, 0);
++	printf("SWEET GPU: full release t=%llu\n", gpu_uptime_ms());
++	(void)sweet_log_sync();
++	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 0);
++	printf("SWEET GPU: full released t=%llu\n", gpu_uptime_ms());
++	(void)sweet_log_sync();
++	for (i = 1; i <= 1000; ++i) {
++		init = gpu_rd(gpu_gmu, GMU_CM3_FW_INIT_RESULT);
++		if ((init & mask) == want) {
++			break;
++		}
++		delay(100);
++	}
++	ok = i <= 1000;
++	gpu_full_ok = ok;
++	printf("SWEET GPU: full init polls=%u fw-init=%#x (%s) t=%llu\n", i,
++	    init, ok ? "match" : "no match", gpu_uptime_ms());
++	(void)sweet_log_sync();
++	/* Host memory the firmware wrote, readable without touching the GMU. */
++	printf("SWEET GPU: full pool log=%#x hfi=%#x cmd=%#x rsp=%#x\n",
++	    gpu_pool_rd(GMU_POOL_LOG), gpu_pool_rd(GMU_POOL_HFI),
++	    gpu_pool_rd(HFI_CMD_HEADER + 40), gpu_pool_rd(HFI_RSP_HEADER + 40));
++	/*
++	 * Halt before the rest of the GMU is read: with the CM3 out of reset
++	 * the 0122 boot showed that even the probe's own reads can wedge, and
++	 * a halted core leaves the block answering.
++	 */
++	gpu_wr(gpu_gmu, GMU_CM3_SYSRESET, 1);
++	printf("SWEET GPU: full halted reset=%#x busy=%#x hfi=%#x rpmh=%#x"
++	    " sgfsr=%#x\n", gpu_rd(gpu_gmu, GMU_CM3_SYSRESET),
++	    gpu_rd(gpu_gmu, GMU_CM3_FW_BUSY),
++	    gpu_rd(gpu_gmu, GMU_HFI_CTRL_STATUS),
++	    gpu_rd(gpu_gmu, GMU_RPMH_POWER_STATE),
++	    gpu_smmu ? gpu_rd(gpu_smmu, SMMU_GR0_SGFSR) : 0);
++	gpu_full_undo(votes_before, general7_before, "undo");
++	(void)sweet_log_sync();
++	printf("SWEET GPU: full done, cm3 reset=%#x\n",
++	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET));
++	(void)sweet_log_sync();
++	int rb = 0;
++
++	PE_parse_boot_argn("gpu_reboot", &rb, sizeof(rb));
++	if (rb) {
++		printf("SWEET GPU: full reboot, back to recovery for the log\n");
++		(void)sweet_log_sync();
++		reboot_kernel(RB_QUICK | RB_NOSYNC, "gpu full probe done");
++	}
++	return ok;
++}
++
+ static bool
+ gpu_gmu_boot_try(void)
+ {
++	int full = 0;
++
+ 	if (!gpu_gmu || !gpu_gmu_live) {
+ 		return false;
+ 	}
++	PE_parse_boot_argn("gpu_full", &full, sizeof(full));
++	if (full) {
++		return gpu_gmu_full_boot();
++	}
+ 	printf("SWEET GPU: gmu pre-boot reset=%#x boot-cfg=%#x wfi=%#x"
+ 	    " qtbl=%#x/%#x log=%#x sfr=%#x cm3-cfg=%#x\n",
+ 	    gpu_rd(gpu_gmu, GMU_CM3_SYSRESET),
+@@ -2904,6 +3321,12 @@
+ 	gpu_gmu_fence_allow("gx-on");
+ 	gpu_gmu_report("gx-on");
+ 	gpu_gmu_boot_try();
++	if (gpu_full_ran) {
++		printf("SWEET GPU: init stops, the full probe owned the gmu (%s)\n",
++		    gpu_full_ok ? "fw up" : "no fw init");
++		(void)sweet_log_sync();
++		return;
++	}
+ 	if (gpu_xrel_ran) {
+ 		printf("SWEET GPU: init stops, the release probe owned the gmu\n");
+ 		(void)sweet_log_sync();
