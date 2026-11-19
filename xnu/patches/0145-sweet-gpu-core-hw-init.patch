@@ -1,5 +1,5 @@
---- a/xnu/bsd/dev/sweet_gpu.c
-+++ b/xnu/bsd/dev/sweet_gpu.c
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
 @@ -348,6 +348,11 @@
  #define GMU_AO_COUNTER_H        GMU_REG(0x1f889u)
  #define GMU_AO_CX_BUSY_STATUS   GMU_REG(0x23b0cu)
