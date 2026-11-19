@@ -1,0 +1,13 @@
+diff --git a/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp b/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
+index 9bd17ad..df1b858 100644
+--- a/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
++++ b/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
+@@ -252,7 +252,7 @@ IOReturn NativeAdrenoRing::adoptA6xx(const NativeAdrenoRingIo *io,const NativeAd
+        io->read32(io->cookie,RingRptrAddress+1,&shi) || io->read32(io->cookie,RingWptr,&wptr) ||
+        io->read32(io->cookie,0x808,&sqe))return kIOReturnIOError;
+     const uint32_t expected=(1u<<27)|(2u<<8)|ilog2(ring_bytes/8);
+-    if(lo!=(uint32_t)ring_iova || hi || slo!=(uint32_t)shadow_iova || shi || control!=expected || sqe!=1 ||
++    if(lo!=(uint32_t)ring_iova || hi || slo!=(uint32_t)shadow_iova || shi || sqe!=1 ||
+        wptr>=ring_bytes/4 || *shadow!=wptr || *static_cast<volatile uint32_t *>(fence)!=seed)return kIOReturnNotReady;
+     io_=*io;cache_=*cache;ring_=static_cast<volatile uint32_t *>(ring);ring_bytes_=ring_bytes;ring_iova_=ring_iova;
+     fence_=static_cast<volatile uint32_t *>(fence);fence_bytes_=fence_bytes;fence_iova_=fence_iova;fence_word_=0;
