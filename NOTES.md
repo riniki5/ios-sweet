@@ -437,6 +437,23 @@ one-level/no-bus-scaling form (`cnoc 0x5007c`, DDR `0x50000/0x5003c/0x5000c`);
 TEST follows, then GPU_SET. It also prints `hfi done power/sptprac/gx/cx` after
 the ack, which is the state the core bring-up will start from.
 
+0144 booted (log86) and every message was acked: `perf gx_top=0x1a00408
+cx_top=0x400202` (the votes computed from toco's cmd-db), `msg 4/3/5 ack
+status=0`, `gpu oob ... info=0x1000000` and `hfi done power=0 sptprac=0x28
+gx=0xf8222000 cx=0xf8222000` - both GDSCs on. The same log shows the GX clock
+reaching `branch=0x4221 rcg=0x2` at SPTPRAC time, i.e. the gfx3d branch is
+enabled and the RCG root no longer reads ROOT_OFF, which is the state every
+pre-0142 probe could not reach. 0145 (`gpu_core=1`) uses that window to run
+a6xx_start's register part on the core itself: the a615 HWCG table (63 regs),
+the GMU AO CGC trio and the GX SPTPRAC clock gate around it, RBBM_CLOCK_CNTL
+`0x8AA8AA82`, the a615 VBIF QOS `0x3`, the UCHE range/trap/GMEM window
+(512 KiB at VA 1 MiB), ROQ thresholds and pool size, PC_DBG_ECO `0x300<<11`,
+the NC mode words from toco's DT (`highest-bank-bit 14`, 32-byte access,
+UBWC 2.0) and the 28-range CP protect table. It prints `core rev/status/clock`
+before and a three-way readback (`clock`, `protect`, `nc`) after, so a zero
+window is visible instead of inferred. SQE load, CP start and the core's own
+SMMU bank follow in 0146.
+
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
 the patch applied: 0103 had been diffed from the 0101 tree, dxb's patch step
 skipped it whole, and the "0103" kernel behaved exactly like 0102. Every new
