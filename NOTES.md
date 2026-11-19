@@ -454,6 +454,22 @@ before and a three-way readback (`clock`, `protect`, `nc`) after, so a zero
 window is visible instead of inferred. SQE load, CP start and the core's own
 SMMU bank follow in 0146.
 
+0146 (`gpu_cp=1`, which also runs 0145's register stage first) puts the CP on
+the pool. The GPU's kernel stream 0 gets its own context bank 0 sharing the
+tables the GMU's bank 1 walks, so the ring, SQE and result words are all at
+`0x60000000 + pool offset`; the ring is 16 KiB at `+0x4000`, the shadow/
+result/fence words and the IB at `+0x14000`, and `a630_sqe.fw` without its
+first word at `+0x18000`. Before the CP is touched it sends the DCVS OOB
+(`0x8ff0/4/8`, SET 23, ACK 31, level 1), which 0144 skipped because the
+reference sends it before GPU_SET. It then writes `a6xx_enable_64bit`'s twelve
+1s, CP_RB_BASE/SQE_INSTR_BASE/RPTR_ADDR, CP_RB_CNTL `12|2<<8|1<<27` sized to
+the 16 KiB ring, CP_SQE_CNTL 1, ME_INIT (`0x2f`, 3, `0x20000000`, four zeros),
+and flushes with WHERE_AM_I plus CP_RB_WPTR. Three commands follow that the
+host can see: a MEM_WRITE from the ring, the same from an indirect buffer, and
+a CACHE_FLUSH_TS fence, each polled in the pool; `core state` then prints
+RBBM status/int, CP fault/IRQ/protect status, RPTR/WPTR and the core bank's
+FSR/FSYNR0/FAR.
+
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
 the patch applied: 0103 had been diffed from the 0101 tree, dxb's patch step
 skipped it whole, and the "0103" kernel behaved exactly like 0102. Every new
