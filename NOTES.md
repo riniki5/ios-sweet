@@ -545,6 +545,18 @@ clean xnu-8796.141.3 tree (only the pre-existing 0031/0041 need the vendor
 `bsd/sweet_hfs` tree, which the build image has). Next: CI build, then boot
 `kernel.development.sweet` and check `SWEET ADRENO`/`SWEET RENDER` lines.
 
+Status after the switch (2026-11-19 13:12Z): series pushed as `1137ae2`,
+kernel CI run `44531095282` on `macos-15-intel` building; userspace workflows
+`metal`/`metal2`/`gles` vendored too (`metal.yml` needed `macos-15-intel`
+because `macos-14` is retired, commit `a8619cf`). Bundle install does not need
+the DC file server: the flashed toco root is `work-toco/ios16-root.simg`, and
+WSL can mount HFS+ (hfsplus.ko built from WSL2-Linux-Kernel, see
+`work-toco/wsl-setup-hfs.sh`), so install the `NativeAdrenoMetal`/`SweetMetal2`
+bundle into `/System/Library/Extensions` offline
+(`work-toco/wsl-install-bundles.sh`) and update userdata. Writing userdata is
+the only destructive step and is still an open decision (full reflash vs
+ranged delta writes against a verified base image).
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

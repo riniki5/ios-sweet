@@ -130,6 +130,9 @@ them into the iOS rootfs when the kernel driver is up.
 | 165 | 0244 | sweet-fb-flip-live-modes |
 | 166 | (toco adaptation) | usb link-state, toco touch driver, 1080x2340 panel/touch edges |
 
-Also ported beyond the GPU series: 0148 (multi-block BO pool), 0149/0150
-(BCM votes), 0169 (DDR bandwidth), 0180/0181 (display pipeline dump, page-flip
-present), 0244/0245/0246 (flip live modes, flush guard, GPU present copy).
+DC28088 patches that had to be re-generated rather than copied (0147, 0149,
+0169, 0180) were hand-merged into this tree because they touch files the toco
+side has diverged on (`sweet_ufs.c`, BCM/DDR votes, `sweet_rpmh.c`); their
+commit diffs are what `xnu/patches` contains. 0148 applied as-is. 0244, 0245
+and 0246 landed as one commit (the later two were no-ops on top of 0244), so
+they are a single patch, 0165.
