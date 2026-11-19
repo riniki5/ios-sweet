@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp b/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
 --- a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
 +++ b/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
-@@ -32,17 +32,22 @@ extern "C" int sweet_native_adreno_render_profile(uintptr_t mapping,NativeAdrenoAbiDeviceInfo *info)
+@@ -36,17 +36,22 @@ extern "C" int sweet_native_adreno_render_profile(uintptr_t mapping,NativeAdrenoAbiDeviceInfo *info)
   for(const auto &entry:setup) {
    core[entry.reg]=entry.value;
    __asm__ volatile("dsb sy":::"memory");
