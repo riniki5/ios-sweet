@@ -470,6 +470,24 @@ a CACHE_FLUSH_TS fence, each polled in the pool; `core state` then prints
 RBBM status/int, CP fault/IRQ/protect status, RPTR/WPTR and the core bank's
 FSR/FSYNR0/FAR.
 
+0146 booted (log87) and the whole core path landed. `core rev=0x23 status=0x1`
+(the window answers), the 63-register HWCG stage reads back 3/3 with
+`clock=0x8AA8AA82`, then bank 0 maps with `sctlr=0x1127` and both ATS probes
+(the ring and the SQE) return the pool's PA. The SQE image reads back, DCVS
+level 1 is acked (`ret=0`, ACK bit 31), and ME_INIT is taken: `rptr-polls=1
+idle-polls=2 wptr=12 rptr=0xc`. The ring MEM_WRITE wrote `0xc0ac4a01`, the
+indirect buffer `0xc0ac4a02`, and CACHE_FLUSH_TS `0xc0ac4a03`; the final state
+is `rbbm=0x1 int0=0 fault=0 irq=0 protect=0 rptr=0x1f wptr=0x1f`, i.e. the CP
+is idle, has consumed the whole ring and reports no fault. The bank's FSR
+shows `0x400` with FAR 0: no unresolved fault. This is the hardware level a
+real driver starts from - what is missing is the shader/GMEM path and a
+userspace client, not the command processor.
+
+**Watch out:** `ARRAY_SIZE` is not in scope in sweet_gpu.c for the kernel
+build (`-Werror=implicit-function-declaration` fails); spell counts with
+sizeof. Also 0145's patch was first shipped with an `a/xnu/...` prefix, which
+dxb skips silently - patches must be `a/bsd/dev/...`.
+
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
 the patch applied: 0103 had been diffed from the 0101 tree, dxb's patch step
 skipped it whole, and the "0103" kernel behaved exactly like 0102. Every new
