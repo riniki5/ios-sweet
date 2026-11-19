@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp b/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
 --- a/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
 +++ b/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
-@@ -252,9 +252,24 @@ IOReturn NativeAdrenoRing::adoptA6xx(const NativeAdrenoRingIo *io,const NativeAdrenoRingCache *cache,
+@@ -252,11 +252,22 @@ IOReturn NativeAdrenoRing::adoptA6xx(const NativeAdrenoRingIo *io,const NativeAdrenoRingCache *cache,
         io->read32(io->cookie,RingRptrAddress+1,&shi) || io->read32(io->cookie,RingWptr,&wptr) ||
         io->read32(io->cookie,0x808,&sqe))return kIOReturnIOError;
      const uint32_t expected=(1u<<27)|(2u<<8)|ilog2(ring_bytes/8);
