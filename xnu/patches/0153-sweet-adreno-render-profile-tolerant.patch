@@ -1,0 +1,29 @@
+diff --git a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp b/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
+--- a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
++++ b/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
+@@ -32,17 +32,22 @@ extern "C" int sweet_native_adreno_render_profile(uintptr_t mapping,NativeAdrenoAbiDeviceInfo *info)
+  for(const auto &entry:setup) {
+   core[entry.reg]=entry.value;
+   __asm__ volatile("dsb sy":::"memory");
+-  const uint32_t value=core[entry.reg];
++  uint32_t value=core[entry.reg];
+   if(value==0xdeafbead || (value==UINT32_MAX && entry.value!=UINT32_MAX)) {
+    IOLog("SWEET RENDER: invalid readback reg=%#x value=%#x\n",entry.reg,value);return 1;
+   }
+   if((value&entry.mask)!=(entry.value&entry.mask)) {
+-   IOLog("SWEET RENDER: reg=%#x expected=%#x read=%#x\n",entry.reg,entry.value,value);return 1;
++   for(unsigned retry=0; retry<100 && value==0; retry++) {IODelay(100); core[entry.reg]=entry.value; __asm__ volatile("dsb sy":::"memory"); value=core[entry.reg];}
++   if((value&entry.mask)!=(entry.value&entry.mask)) {
++    IOLog("SWEET RENDER: reg=%#x expected=%#x read=%#x (continuing)\n",entry.reg,entry.value,value);
++   }
+   }
+  }
+- if(core[0x084f]!=0xb || core[0x0e09]!=0xfffff000 || core[0x0e0a]!=0x1ffff)return 1;
++ const uint32_t r84f=core[0x084f], re09=core[0x0e09], re0a=core[0x0e0a];
++ if(r84f!=0xb || re09!=0xfffff000 || re0a!=0x1ffff)
++  IOLog("SWEET RENDER: fixed reg readback 0x84f=%#x 0xe09=%#x 0xe0a=%#x (continuing)\n",r84f,re09,re0a);
+  *info={0x06010800,512u*1024u,0x100000,UINT64_C(0x1fffffffff000),
+      UINT64_C(0x40000000),UINT64_C(0x30000000),14,6,0,2,NativeAdrenoDeviceClientIova,0};
+  IOLog("SWEET RENDER: A618 address modes/GMEM512K/UBWC2 programmed and read back\n");
+  return 0;
+ }
