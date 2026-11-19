@@ -1,0 +1,180 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -435,7 +435,13 @@
+ #define HFI_WRITE_INDEX         44u
+ #define HFI_MSG_INIT            0u
+ #define HFI_MSG_FW_VERSION      1u
++#define HFI_MSG_BW_TABLE        3u
++#define HFI_MSG_PERF_TABLE      4u
++#define HFI_MSG_TEST            5u
+ #define HFI_MSG_ERROR           100u
++/* Full struct sizes: the firmware reads them by message size, as Linux sends them. */
++#define HFI_PERF_DWORDS         43u
++#define HFI_BW_DWORDS           160u
+ #define GMU_POOL_DEBUG          0x10000u
+ #define GMU_DEBUG_BYTES         0x4000u
+ /* What the GMU sees: the reference's 0x60000000 window, mapped by the bank. */
+@@ -3315,10 +3321,116 @@
+ }
+ 
+ /*
++ * The PERF_TABLE the firmware gets: toco's GPU OPP table (stock boot.dtb,
++ * speed bin 0) against the cmd-db level maps log85 read -- gfx.lvl
++ * 0,16,64,128,192,256,320,384,416; mx.lvl 0,16,192,320,384; cx.lvl
++ * 0,16,64,128,192,256,384. A vote is level<<16 | mx index<<8 | rail index,
++ * a6xx_gmu_rpmh_arc_votes_init's encoding, and the same word
++ * GMU_GX_VOTE_IDX/GMU_MX_VOTE_IDX take in its low bytes.
++ */
++#define GMU_LEVELS_GX           9u
++#define GMU_LEVELS_CX           2u
++static const uint32_t gpu_gx_khz[GMU_LEVELS_GX] = { 0, 180000, 267000,
++    355000, 430000, 565000, 650000, 800000, 825000 };
++static const uint32_t gpu_gx_level[GMU_LEVELS_GX] = { 0, 16, 64, 128, 192,
++    256, 320, 384, 416 };
++static const uint32_t gpu_cx_khz[GMU_LEVELS_CX] = { 0, 200000 };
++static const uint32_t gpu_cx_level[GMU_LEVELS_CX] = { 0, 48 };
++static const uint32_t gpu_gfx_db[] = { 0, 16, 64, 128, 192, 256, 320, 384, 416 };
++static const uint32_t gpu_mx_db[] = { 0, 16, 192, 320, 384 };
++static const uint32_t gpu_cx_db[] = { 0, 16, 64, 128, 192, 256, 384 };
++
++static bool
++gpu_arc_vote(const uint32_t *pri, unsigned pri_count, const uint32_t *sec,
++    unsigned sec_count, uint32_t level, uint32_t *vote)
++{
++	unsigned pindex = pri_count, sindex = 0, j;
++
++	for (j = 0; j < pri_count; ++j) {
++		if (pri[j] >= level) {
++			pindex = j;
++			break;
++		}
++	}
++	if (pindex == pri_count) {
++		return false;
++	}
++	for (j = 0; j < sec_count; ++j) {
++		if (sec[j] >= level) {
++			sindex = j;
++			break;
++		}
++		if (sec[j]) {
++			sindex = j;
++		}
++	}
++	*vote = (pri[pindex] << 16) | (sindex << 8) | pindex;
++	return true;
++}
++
++static bool
++gpu_hfi_perf_table(uint32_t *perf)
++{
++	uint32_t vote;
++	unsigned i;
++
++	bzero(perf, HFI_PERF_DWORDS * 4u);
++	perf[1] = GMU_LEVELS_GX;
++	perf[2] = GMU_LEVELS_CX;
++	for (i = 0; i < GMU_LEVELS_GX; ++i) {
++		if (!gpu_arc_vote(gpu_gfx_db, sizeof(gpu_gfx_db) / sizeof(gpu_gfx_db[0]),
++		    gpu_mx_db, sizeof(gpu_mx_db) / sizeof(gpu_mx_db[0]),
++		    gpu_gx_level[i], &vote)) {
++			printf("SWEET GPU: hfi perf: GX level %u missing from cmd-db\n",
++			    gpu_gx_level[i]);
++			return false;
++		}
++		perf[3 + 2 * i] = vote;
++		perf[4 + 2 * i] = gpu_gx_khz[i];
++	}
++	for (i = 0; i < GMU_LEVELS_CX; ++i) {
++		if (!gpu_arc_vote(gpu_cx_db, sizeof(gpu_cx_db) / sizeof(gpu_cx_db[0]),
++		    gpu_mx_db, sizeof(gpu_mx_db) / sizeof(gpu_mx_db[0]),
++		    gpu_cx_level[i], &vote)) {
++			printf("SWEET GPU: hfi perf: CX level %u missing from cmd-db\n",
++			    gpu_cx_level[i]);
++			return false;
++		}
++		perf[35 + 2 * i] = vote;
++		perf[36 + 2 * i] = gpu_cx_khz[i];
++	}
++	printf("SWEET GPU: hfi perf gx_top=%#x cx_top=%#x\n",
++	    perf[3 + 2 * (GMU_LEVELS_GX - 1u)], perf[35 + 2 * (GMU_LEVELS_CX - 1u)]);
++	return true;
++}
++
++/*
++ * BW_TABLE for a GMU that does no bus scaling: one bandwidth level, one CNOC
++ * command and three DDR ones, all fixed votes (a6xx_hfi_send_bw_table).
++ */
++static void
++gpu_hfi_bw_table(uint32_t *bw)
++{
++	bzero(bw, HFI_BW_DWORDS * 4u);
++	bw[1] = 1;             /* bandwidth levels */
++	bw[2] = 1;             /* CNOC commands */
++	bw[3] = 3;             /* DDR commands */
++	bw[4] = 1;             /* CNOC wait bitmask */
++	bw[5] = 1;             /* DDR wait bitmask */
++	bw[6] = 0x5007cu;      /* CNOC address */
++	bw[12] = 0x40000000u;  /* CNOC data */
++	bw[18] = 0x60000001u;
++	bw[24] = 0x50000u;     /* DDR addresses */
++	bw[25] = 0x5003cu;
++	bw[26] = 0x5000cu;
++	bw[32] = bw[33] = bw[34] = 0x40000000u;
++}
++
++/*
+  * The handshake a6xx_gmu_resume runs once FW_INIT_RESULT is in: tell the CM3
+  * which rail entries to vote, let it boot GX and acknowledge, power SPTPRAC,
+- * start the HFI queues, then hand the firmware an address space and ask it
+- * what version it is.
++ * start the HFI queues, then hand the firmware its tables, an address space
++ * and a version.
+  */
+ static bool
+ gpu_gmu_hfi_start(void)
+@@ -3327,6 +3439,7 @@
+ 	uint32_t init[5] = { 0, 0, GMU_IOVA(GMU_POOL_DEBUG),
+ 	    GMU_DEBUG_BYTES, 1 };
+ 	uint32_t version[2] = { 0, (1u << 28) | (1u << 19) | (1u << 17) };
++	uint32_t perf[HFI_PERF_DWORDS], bw[HFI_BW_DWORDS], test[1] = { 0 };
+ 
+ 	printf("SWEET GPU: hfi begin t=%llu\n", gpu_uptime_ms());
+ 	(void)sweet_log_sync();
+@@ -3420,6 +3533,22 @@
+ 		printf("SWEET GPU: hfi: no version ack\n");
+ 		return false;
+ 	}
++	if (!gpu_hfi_perf_table(perf)) {
++		return false;
++	}
++	if (!gpu_hfi_send(HFI_MSG_PERF_TABLE, perf, HFI_PERF_DWORDS)) {
++		printf("SWEET GPU: hfi: no perf table ack\n");
++		return false;
++	}
++	gpu_hfi_bw_table(bw);
++	if (!gpu_hfi_send(HFI_MSG_BW_TABLE, bw, HFI_BW_DWORDS)) {
++		printf("SWEET GPU: hfi: no bw table ack\n");
++		return false;
++	}
++	if (!gpu_hfi_send(HFI_MSG_TEST, test, 1)) {
++		printf("SWEET GPU: hfi: no test ack\n");
++		return false;
++	}
+ 	gpu_wr(gpu_gmu, GMU_HOST2GMU_INTR_SET, 1u << GMU_OOB_GPU_SET);
+ 	for (i = 1; i <= 10000; ++i) {
+ 		v = gpu_rd(gpu_gmu, GMU_GMU2HOST_INTR_INFO);
+@@ -3429,6 +3558,13 @@
+ 		delay(100);
+ 	}
+ 	printf("SWEET GPU: hfi gpu oob polls=%u info=%#x\n", i, v);
++	if (i <= 10000) {
++		printf("SWEET GPU: hfi done power=%#x sptprac=%#x gx=%#x cx=%#x\n",
++		    gpu_rd(gpu_gmu, GMU_RPMH_POWER_STATE),
++		    gpu_rd(gpu_gmu, GMU_SPTPRAC_PWR_STATUS),
++		    gpu_rd(gpu_cc, GPUCC_GX_GDSCR),
++		    gpu_rd(gpu_cc, GPUCC_CX_GDSCR));
++	}
+ 	(void)sweet_log_sync();
+ 	if (i > 10000) {
+ 		return false;

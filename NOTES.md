@@ -415,6 +415,28 @@ queue headers (`0x6000d000`/`0x6000e000`), CP_MSG (`0x60008003`) and the HFI
 INIT debug page (`0x60010000`), with the ATS probes moved to the same IOVAs
 plus one past the window and one in the low space.
 
+0142 booted (log85) and the handshake is done. With the pool mapped at
+`0x60000000` the store that had killed four boots returns: `hfi init store done`,
+`post store init=0x1`, `ctrl polls=1 status=0x1`, then `msg 0 ack status=0`
+(INIT), `msg 1 ack status=0 payload=0x10110000` (FW_VERSION, HFI v1.1.0) and
+`gpu oob polls=2 info=0x1000000` (GPU_SET ack). `smmu post-hfi ... sgfsr=0`,
+and the shim then undid the GMU and rebooted to recovery as asked - the "kernel
+panic" on the screen is that deliberate `reboot_kernel`, not a fault. So the
+CM3's first host access killed the AP only because the pool's physical address
+has bit 31 set; the reference's `0x60000000` window is the load-bearing part,
+not the mapping constants. What is still missing before the GPU core can run:
+the reference sends PERF_TABLE, BW_TABLE and TEST after FW_VERSION and before
+GPU_SET, and ours goes straight to GPU_SET.
+
+0144 closes that gap using log85's cmd-db maps and the stock boot.dtb
+`qcom,gpu-pwrlevels-0` table (speed bin 0): nine GX levels (off, then 180
+through 825 MHz on gfx.lvl 16/64/128/192/256/320/384/416) and two CX levels
+(off, 200 MHz at MIN_SVS), each as the reference's
+`level<<16 | mx index<<8 | rail index` vote; the BW_TABLE is the fixed
+one-level/no-bus-scaling form (`cnoc 0x5007c`, DDR `0x50000/0x5003c/0x5000c`);
+TEST follows, then GPU_SET. It also prints `hfi done power/sptprac/gx/cx` after
+the ack, which is the state the core bring-up will start from.
+
 **Patch hygiene (learned from run 43812998562).** A green build does not prove
 the patch applied: 0103 had been diffed from the 0101 tree, dxb's patch step
 skipped it whole, and the "0103" kernel behaved exactly like 0102. Every new
