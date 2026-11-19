@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
-index a613967..6f68271 100644
+index a613967..59c5095 100644
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
 @@ -508,6 +508,8 @@ void sweet_gpu_init(void);
@@ -1097,7 +1097,7 @@ index a613967..6f68271 100644
  static void
  gpu_core_hw_init(void)
  {
-@@ -3764,6 +4838,309 @@ gpu_core_hw_init(void)
+@@ -3764,6 +4838,310 @@ gpu_core_hw_init(void)
  	(void)sweet_log_sync();
  }
  
@@ -1321,7 +1321,8 @@ index a613967..6f68271 100644
 +		return;
 +	}
 +	gpu_core_dcvs(CORE_PERF_LOWEST);
-+	for (i = 0; i < ARRAY_SIZE(gpu_a615_addr_modes); ++i) {
++	for (i = 0; i < sizeof(gpu_a615_addr_modes) /
++	    sizeof(gpu_a615_addr_modes[0]); ++i) {
 +		gpu_wr(gpu_core, gpu_a615_addr_modes[i], 1u);
 +	}
 +	gpu_wr(gpu_core, CORE_CP_PERFCTR_CP_SEL0, 0);
@@ -1407,7 +1408,7 @@ index a613967..6f68271 100644
  /* Whatever the CM3 got, the host side goes back to how the probe found it. */
  static void
  gpu_full_undo(uint32_t votes_before, uint32_t general7_before, const char *why)
-@@ -3780,11 +5157,12 @@ gpu_gmu_full_boot(void)
+@@ -3780,11 +5158,12 @@ gpu_gmu_full_boot(void)
  	uint32_t votes_before, general7_before, ver, mask, want, init = 0;
  	unsigned i;
  	bool ok;
@@ -1421,7 +1422,7 @@ index a613967..6f68271 100644
  	{
  		int pre = 0;
  
-@@ -3918,9 +5296,12 @@ gpu_gmu_full_boot(void)
+@@ -3918,9 +5297,12 @@ gpu_gmu_full_boot(void)
  		printf("SWEET GPU: full hfi did not start\n");
  	}
  	(void)sweet_log_sync();
