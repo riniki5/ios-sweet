@@ -1,0 +1,28 @@
+diff --git a/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp b/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
+--- a/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
++++ b/iokit/Kernel/arm/unixnu/NativeAdrenoRing.cpp
+@@ -252,9 +252,24 @@ IOReturn NativeAdrenoRing::adoptA6xx(const NativeAdrenoRingIo *io,const NativeAdrenoRingCache *cache,
+        io->read32(io->cookie,RingRptrAddress+1,&shi) || io->read32(io->cookie,RingWptr,&wptr) ||
+        io->read32(io->cookie,0x808,&sqe))return kIOReturnIOError;
+     const uint32_t expected=(1u<<27)|(2u<<8)|ilog2(ring_bytes/8);
+-    if(lo!=(uint32_t)ring_iova || hi || slo!=(uint32_t)shadow_iova || shi || sqe!=1 ||
+-       wptr>=ring_bytes/4 || *shadow!=wptr || *static_cast<volatile uint32_t *>(fence)!=seed)return kIOReturnNotReady;
++    const uint32_t fencev=*static_cast<volatile uint32_t *>(fence);
++    const uint32_t shadowv=*shadow;
++    const bool bad_base=(lo!=(uint32_t)ring_iova || hi!=0);
++    const bool bad_shadow=(slo!=(uint32_t)shadow_iova || shi!=0);
++    const bool bad_state=(sqe!=1 || wptr>=ring_bytes/4 || shadowv!=wptr || fencev!=seed);
++    if(bad_base || bad_shadow || bad_state) {
++        IOLog("SWEET NATIVE ADRENO: adopt mismatch base=%#x:%#x want=%#llx ctrl=%#x exp=%#x shadow=%#x:%#x want=%#llx wptr=%#x sqe=%#x shv=%#x fence=%#x seed=%#x\n",
++            hi,lo,(unsigned long long)ring_iova,control,expected,
++            shi,slo,(unsigned long long)shadow_iova,wptr,sqe,shadowv,fencev,seed);
++        return kIOReturnNotReady;
++    }
++    IOLog("SWEET NATIVE ADRENO: adopt ok base=%#x ctrl=%#x shadow=%#x wptr=%#x sqe=%#x seed=%#x\n",
++        lo,control,slo,wptr,sqe,seed);
+     io_=*io;cache_=*cache;ring_=static_cast<volatile uint32_t *>(ring);ring_bytes_=ring_bytes;ring_iova_=ring_iova;
+     fence_=static_cast<volatile uint32_t *>(fence);fence_bytes_=fence_bytes;fence_iova_=fence_iova;fence_word_=0;
+     a6xx_=true;a6xx_shadow_=shadow;a6xx_shadow_iova_=shadow_iova;
+     next_=rptr_shadow_=wptr;seqno_=completed_=seed;submissions_=0;attached_=true;
+     return kIOReturnSuccess;
+ }
