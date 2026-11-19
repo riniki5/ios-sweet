@@ -4,7 +4,9 @@ on:
   workflow_call:
 jobs:
   build:
-    runs-on: macos-15
+    # macos-14 was retired 2026-11-02; keep the Intel image the bundle was
+    # validated on (same choice as xnu.yml).
+    runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
