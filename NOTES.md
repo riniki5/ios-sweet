@@ -519,6 +519,32 @@ IONetworkInterface/IONetworkController objects so configd enumerates the
 service (same gap as on sweet). Audio (tavil/wcd934x over SLIMbus) and sensors
 (SSC) are DSP firmware bound like WiFi.
 
+**0147 (2026-11-19): the shader/GMEM dispatch path — submitted.**
+`gpu_shader_dispatch()` is in the tree (`work-toco/btc0146/xnu/bsd/dev/sweet_gpu.c`,
+commit `3ec678a`, patch `xnu/patches/0147-sweet-gpu-shader-gmem.patch`): after the
+CP is idle it writes a `SELECT_CP_STATE` + `PM4_DISPATCH` packet onto the CP ring
+and polls the CP — rptr == wptr and fault == 0 — gated by boot arg
+`gpu_dispatch=1`. CI run 44524636612 in progress. Caveats: the opcodes
+(`PM4_SELECT_CP_STATE 0x06`, `PM4_DISPATCH 0x8au`) are from the adreno 6xx model;
+verify against the vendor `adreno_pm4.xml` from the first boot log.
+
+**2026-11-19: DC28088 GPU/Metal stack integrated as the patch series.**
+The toco GPU series is now the proven sweet stack, not the local bring-up.
+`xnu/patches/` is 166 files: 0001-0080 prefix (0046/0056/0079 replaced by
+DC28088's versions), 0081-0165 the DC28088 Adreno/GMU/HFI/SMMU/CP,
+NativeAdreno (ring/VM/submit/user client), Metal/GLES integration, clocks/OPP,
+DDR/BCM votes, present/page-flip and scheduler patches renumbered in
+application order, and 0166 the toco deltas (USB link-state, toco touch
+driver, 1080x2340 panel geometry and touch edges). The old local 0083-0147
+GPU bring-up and 0127-0130 CPU-framebuffer present experiments are superseded;
+they remain in git history up to `3ec678a`. Full mapping and rationale:
+`docs/gpu-port.md`. Userspace (`userspace/{metal,metal2,native-metal,gles}`,
+`third_party/unixnu`, the Metal/GLES build scripts and workflows) is vendored
+from the same repo. The 166-patch series was verified to apply in order on a
+clean xnu-8796.141.3 tree (only the pre-existing 0031/0041 need the vendor
+`bsd/sweet_hfs` tree, which the build image has). Next: CI build, then boot
+`kernel.development.sweet` and check `SWEET ADRENO`/`SWEET RENDER` lines.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

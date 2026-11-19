@@ -1,0 +1,21 @@
+diff --git a/bsd/dev/sweet_adreno_clock.c b/bsd/dev/sweet_adreno_clock.c
+index 3285965..2aefbc6 100644
+--- a/bsd/dev/sweet_adreno_clock.c
++++ b/bsd/dev/sweet_adreno_clock.c
+@@ -146,10 +146,12 @@ a618_enable_gmu_clocks(const struct a618_io *gpucc,
+ 		if (error)
+ 			return error;
+ 	}
+-	/* CXO and AHB first; no GX clock or PLL0/PLL1 register is touched. */
+-	error = branch(gpucc, 0, 0x1004, result);
+-	if (!error)
+-		error = branch(gpucc, 0, 0x109c, result);
++	/* The SM7150 GMU DT requests CXO, not CXO_AON. The extra AON
++	 * branch reads zero and rejects enable on sweet; it is not a GMU
++	 * dependency. Keep the real CXO status check and do not claim AON
++	 * enabled. No GX clock or PLL0/PLL1 register is touched.
++	 */
++	error = branch(gpucc, 0, 0x109c, result);
+ 	if (!error)
+ 		error = branch(gpucc, 0, 0x1078, result);
+ 	if (!error)
