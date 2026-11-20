@@ -2,7 +2,8 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index ae9f6f8..41f4df2 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -112,6 +112,7 @@ bsd/dev/sweet_rpmh.c			standard
+@@ -112,6 +112,7 @@
+ bsd/dev/sweet_rpmh.c			standard
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 +bsd/dev/sweet_files.c			standard
