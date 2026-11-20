@@ -80,8 +80,8 @@ def patch_file_section(patch, rel):
 def kernel_abi_header():
     """Reconstruct the userspace ABI header from the kernel patch series.
 
-    The kernel is authoritative. 0110 creates iokit/Kernel/arm/unixnu/
-    NativeAdrenoABI.h; later patches add SubmitResources and the 4096-BO flag.
+    The kernel is authoritative. The patch series may renumber the ABI header
+    creation when GPU work is migrated; later patches extend that same file.
     Turnip compiles against exactly this header through -Dtu-darwin-abi-dir.
     """
     rel = 'iokit/Kernel/arm/unixnu/NativeAdrenoABI.h'
@@ -89,7 +89,7 @@ def kernel_abi_header():
     if not patches:
         raise SystemExit('No kernel patches; cannot derive the ABI header')
     created = next((p for p in patches
-                    if p.name.startswith('0110-') and 'new file mode' in patch_file_section(p, rel)), None)
+                    if 'new file mode' in patch_file_section(p, rel)), None)
     if created is None:
         raise SystemExit('No patch creates ' + rel)
     section = patch_file_section(created, rel)

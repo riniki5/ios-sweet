@@ -114,7 +114,11 @@ def validate_shell_scripts(verbose=False):
 
     for path in sh_files:
         rel = os.path.relpath(path, REPO_ROOT)
-        res = subprocess.run(['bash', '-n', path], capture_output=True, text=True)
+        # Feed the source over stdin so Windows CRLF checkouts are normalized
+        # by universal-newline mode before bash parses them.
+        with open(path, 'r') as script:
+            source = script.read()
+        res = subprocess.run(['bash', '-n'], input=source, capture_output=True, text=True)
         if res.returncode != 0:
             errors.append(f"{rel}: {res.stderr.strip()}")
         elif verbose:

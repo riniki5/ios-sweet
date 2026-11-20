@@ -6,7 +6,7 @@ This tree ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation)
 
 It is a fork of [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet), the Redmi Note 10 Pro (`sweet`) port, and keeps its patch series. Patch 0082 adds the `toco` hardware: the 1080×2340 panel, the Focaltech FTM5 touch controller and its PM6150L LDO6 rail vote in the RPMh driver. The same kernel, shim and iOS root boot both phones.
 
-As of **2026-11-15** the phone boots to the **iOS home screen in about 90 seconds**, the touchscreen and the hardware buttons work, and so does **navigation**: swipe up from the bottom edge to leave an app, and the app switcher works. Rendering runs entirely on the CPU. The Adreno 618 is being brought up bottom-up (patches 0083–0087): its clock block and CX/GX power domains already come up from the kernel, and the next step, the GPU PLL and clock root, is in the tree. No command submission yet, so nothing is drawn through the GPU.
+As of **2026-11-20** the phone boots to iOS, and the touchscreen and hardware buttons work. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup, and a CP fence have now completed on the toco device. The graphics provider is published afterward, but UI rendering through the GPU is not yet qualified; the display may stay on the Apple loading logo while iOS starts.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
@@ -21,7 +21,7 @@ As of **2026-11-15** the phone boots to the **iOS home screen in about 90 second
 | iOS userland | Real iPhone X 16.7.16 root filesystem and shared cache; launchd and the system daemons run |
 | Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services; CoreAnimation renders in software; frames are copied into the bootloader's framebuffer. Presented to iOS as an iPhone X panel (1125×2436). Optional render scale (`sweetfb_w`/`sweetfb_h`) rasterises fewer pixels and stretches them to the panel |
 | GUI | backboardd, SpringBoard, lock screen, home screen; the home gesture and app switcher work |
-| GPU bring-up | Adreno 618 (`kgsl-3d0`) GPUCC/GDSC power and PLL0 bring-up from the kernel with `gpu=1 gpu_gx=1`. No firmware, SMMU or rendering |
+| GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; UI rendering still needs qualification |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power, volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
 | Battery | IOPMPowerSource service (static 100 %, charging icon) |
@@ -31,7 +31,7 @@ As of **2026-11-15** the phone boots to the **iOS home screen in about 90 second
 ## What does not work (yet)
 
 - **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS or SEP / Face ID.** Wi-Fi and Bluetooth are a Qualcomm WCN3990 combo behind `icnss`, with firmware loaded through the modem subsystem and an IPA data path: a port needs firmware loading (PIL), SMEM/SMP2P, QMI + WMI and a full driver. Daemons for these start and fail or keep relaunching.
-- **No GPU rendering.** There is no Adreno/KGSL driver yet: no GPU firmware (GMU/zap), SMMU page tables, command ring or Metal frontend. Patches 0083–0087 only bring the power domain and PLL0 up and dump registers, so everything is still drawn by the CPU.
+- **GPU UI rendering is not yet qualified.** The kernel reaches CP fence completion and publishes the NativeAdreno service, but a successful on-screen Metal draw and responsive UI have not yet been confirmed. Keep the GPU opt-in and preserve the working touch path while validating the matching userspace bundle.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty. Several apps show a black window (Phone, Photos, Messages) because they need hardware we do not have.
 - **Slow boot:** about 90 seconds on the Apple logo, against a few seconds on a real iPhone.
 - **Security is off:** permissive code signing (AMFI) and sandbox policies, a stub AppleKeyStore, no data protection. Do not put anything personal on it.
@@ -99,20 +99,16 @@ ipsw img4 im4p extract research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im
 
 ### 3. Build the boot image
 
-Needs `aarch64-linux-gnu-gcc` and `mkbootimg`. `SWEET_DEVICE=toco` tells `mkadt.py` and the shim to advertise the 1080×2340 panel; the kernel's touch driver detects the board from that height by itself.
+Needs `aarch64-linux-gnu-gcc` and `mkbootimg`. `SWEET_DEVICE=toco` tells `mkadt.py` and the shim to advertise the 1080×2340 panel; the kernel's touch driver detects the board from that height by itself. For GPU stage 9, put locally obtained, checksum-verified blobs in `research/gpu/fw/`: `a618_gmu.bin`, `a630_sqe.fw`, `a615_zap.mdt`, and `a615_zap.b02`. The build helper checks the pinned SHA-256 values and packages them into `/sweet-adreno` in the boot ADT. Firmware blobs stay local and are not committed.
 
 ```sh
-tools/toco-shim.sh xnu/out/kernel.development.sweet     # -> shim/out/shim-boot.img
+tools/toco-shim.sh xnu/out/kernel.development.sweet     # -> shim/out/shim-boot.img; defaults to sweetgpu=9
 ```
 
-The script runs the three steps for you:
-
-```sh
-SWEET_DEVICE=toco python3 tools/mkadt.py shim/out/sweet.adt --highmem
-python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/sweet.adt shim/out/payload.bin \
-    --cmdline 'debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=60'
-SWEET_DEVICE=toco shim/build.sh ../shim/out/payload.bin
-```
+The helper writes only under `shim/out` in the repository. The local firmware
+blobs are checksum-checked by `tools/sweet-adreno-firmware.py`, embedded into
+the boot ADT, then consumed by XNU when `sweetgpu=9` is enabled. Use
+`SWEET_GPU_STAGE=1` through `9` to select a diagnostic stage.
 
 The CPU renderer is the frame-time limit on this panel, so the image can also report a smaller logical display: build the ADT with `SWEET_FB_W=828 SWEET_FB_H=1792` (iPhone XR class, 414×896 points at 2×) and boot with the matching `sweetfb_w=828 sweetfb_h=1792`. AppleCLCD then stretches the 828×1792 frames to 1080×2340. The ADT and the boot args must agree.
 
@@ -128,7 +124,7 @@ What the less obvious boot-args do:
 | `sweetfb_hz=60` | Panel copy every vsync tick; lower (`30`, default `10`) to trade smoothness for CPU time |
 | `sweetfb_w=N sweetfb_h=N` | Render at a smaller logical size and stretch it to the panel (see above) |
 | `sweetusb=2` | USB device mode: CDC-ECM gadget plus the live kernel console as UDP to the host |
-| `gpu=1 gpu_gx=1` | Adreno 618 bring-up probe: GPUCC clocks, CX and GX power domains, PLL0, register dump (patches 0083–0087). No rendering |
+| `sweetgpu=9` | Opt-in Adreno 618 firmware, GMU/HFI, SMMU, ZAP and CP bring-up. Requires the local firmware set above; a completed fence does not by itself qualify UI rendering |
 | `sweettouch=0`, `sweetkeys=0` | Disable the touch or button driver |
 | `sweettouchdelay=N` | Start the touch thread N seconds after boot (default 45) |
 
@@ -171,7 +167,7 @@ A healthy touch log contains `SWEET TOUCH: panel 1080x2340 ... vddio=0x...`, `SW
 | `.github/workflows/xnu.yml` | Kernel CI build |
 | `tools/mkadt.py` | Generates the Apple Device Tree (`SWEET_DEVICE=toco` for the 1080×2340 panel) |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
-| `tools/toco-shim.sh` | One command from kernel artifact to flashable `shim-boot.img` |
+| `tools/toco-shim.sh` | Builds a temporary-boot `shim-boot.img` with the toco ADT and local GPU firmware |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
 | `tools/sweet-log-pull.sh`, `sweet-log.py` | Read the persistent kernel log from recovery |
