@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp b/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
 --- a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
 +++ b/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
-@@ -36,17 +36,22 @@ extern "C" int sweet_native_adreno_render_profile(uintptr_t mapping,NativeAdrenoAbiDeviceInfo *info)
+@@ -36,15 +36,20 @@
   for(const auto &entry:setup) {
    core[entry.reg]=entry.value;
    __asm__ volatile("dsb sy":::"memory");
@@ -24,6 +24,4 @@ diff --git a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp b/iokit/Kernel/arm/Swe
 +  IOLog("SWEET RENDER: fixed reg readback 0x84f=%#x 0xe09=%#x 0xe0a=%#x (continuing)\n",r84f,re09,re0a);
   *info={0x06010800,512u*1024u,0x100000,UINT64_C(0x1fffffffff000),
       UINT64_C(0x40000000),UINT64_C(0x30000000),14,6,0,2,NativeAdrenoDeviceClientIova,0};
-  IOLog("SWEET RENDER: A618 address modes/GMEM512K/UBWC2 programmed and read back\n");
-  return 0;
- }
+  IOLog("SWEET RENDER: A618 PERFSEL legacy selector=1 accepted\n");

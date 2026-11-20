@@ -54,13 +54,18 @@ def validate_patches(verbose=False):
             if not ('--- ' in head or 'diff ' in head or 'Index:' in head):
                 errors.append(f"Patch missing standard diff header: {fname}")
 
-    # Check contiguous sequence
+    # Check contiguous sequence. 0110 was an abandoned, malformed GPU patch;
+    # its intended worker-release change was regenerated as 0111 from 0109.
+    # Keep this one historical hole explicit so later accidental gaps fail.
+    allowed_gaps = {110}
     if seen_numbers:
         sorted_nums = sorted(seen_numbers.keys())
         expected = 1
         for num in sorted_nums:
             if num != expected:
-                errors.append(f"Gap in patch sequence: expected {expected:04d}, found {num:04d} ({seen_numbers[num]})")
+                missing = set(range(expected, num))
+                if not missing.issubset(allowed_gaps):
+                    errors.append(f"Gap in patch sequence: expected {expected:04d}, found {num:04d} ({seen_numbers[num]})")
                 expected = num + 1
             else:
                 expected += 1
@@ -71,7 +76,7 @@ def validate_patches(verbose=False):
             print(f"    - {err}")
         return False
 
-    print(green(f"[✓] Validated {len(patch_files)} patches (0001-{len(patch_files):04d} contiguous, format OK)"))
+    print(green(f"[✓] Validated {len(patch_files)} patches (0001-{max(seen_numbers):04d} with documented gaps, format OK)"))
     return True
 
 

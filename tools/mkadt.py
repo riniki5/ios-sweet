@@ -207,6 +207,12 @@ def build(seed=None, qemu=False, highmem=False):
             ('compatible', cstr('sweet,display')),
             ('canvas-width', u32(LOGICAL_W)),
             ('canvas-height', u32(LOGICAL_H)),
+        ]),
+        node('adreno', [
+            ph(),
+            ('compatible', cstr('sweet,adreno')),
+            # /arm-io's ranges adds SOC_BASE to each child address.
+            ('reg', u64(0x5000000 - SOC_BASE, 0x100000)),
         ])])
 
     fbcon = node('sweet-fbcon', [
