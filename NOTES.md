@@ -1,3 +1,9 @@
+## 2026-11-20: Toco hardware port to DC GPU branch (build pending)
+- User clarified the destination is this DC28088 tree: preserve its GPU/Metal and WCN3990 work, and bring in the Mi Note 10 Lite (`toco`) target and touch path from `riniki5/ios-sweet`.
+- Started from the fetched, cleaned `origin/main` tip `8514240` on `codex/toco-touch-port`; did not modify the Riniki checkout or its uncommitted notes/logs.
+- Port adds the Toco Focaltech FTM5/FTI touch path at I2C `0x49`, the PM6150L LDO6 3.0 V RPMh vote, ADT/shim selection for the 1080×2340 panel, proportional iPhone X framebuffer scaling, and a Toco boot-image helper that packages the repository's existing A618 GPU firmware flow.
+- Per-file patch-application checks pass for the Toco touch, HID, and framebuffer changes; shell syntax and ADT panel selection checks pass. The full XNU CI build and any device boot on the DC branch are still pending. Do not claim Toco GPU rendering or Wi-Fi on this port until device validation.
+
 ## 2026-11-19 23:50 IST: kernel 2014 built; phone DIED (battery) before booting it
 - Kernel CI 44582763096 SUCCESS -> research/ios26/boot/kernel-44582763096 (2014 patch sha 3440109b matches the series).
   Image 26bO = 26bN cmdline + sweetbuild=2678, ADT wbgb: research/ios26/boot/shim-boot-26bO.img 8ebe514e. NOT booted.

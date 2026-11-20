@@ -1,8 +1,8 @@
 # ios-sweet
 
-**Apple's iOS 16 running on a Redmi Note 10 Pro.**
+**Apple's iOS 16 on SM7150 phones: Redmi Note 10 Pro (`sweet`) and experimental Mi Note 10 Lite (`toco`) support.**
 
-This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
+This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to Qualcomm SM7150 phones. The primary, device-tested target is the Xiaomi Redmi Note 10 Pro (`sweet`, Snapdragon 732G). The Xiaomi Mi Note 10 Lite (`toco`, Snapdragon 730G) shares the SoC family and memory map; its 1080×2340 panel and Focaltech touch driver are an experimental port and still need validation with this repository's GPU/display stack. On both targets the intended userland is the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**.
 
 As of **2026-11-09**, the phone boots to the **iOS home screen with Metal GPU acceleration, working touch and hardware buttons, Wi-Fi with an instant network list, the SIM (calls), built-in speaker audio for apps, Bluetooth audio, Safari video playback, smooth haptics, and screen sleep/wake**. Motion and light sensors now stream into iOS. Animations still run at about 37 fps and apps open with a short delay.
 
@@ -10,12 +10,12 @@ As of **2026-11-09**, the phone boots to the **iOS home screen with Metal GPU ac
 
 ## What works
 
-These are results from the development phone, not a compatibility guarantee for every build. All work is on `main`; the records of the former side branches are in [`docs/branches/`](docs/branches/README.md).
+These are results from the Sweet development phone, not a compatibility guarantee for every build. The records of the former side branches are in [`docs/branches/`](docs/branches/README.md). Toco support is experimental until verified on that device.
 
 | Area | Current result |
 | --- | --- |
 | Boot and iOS | Stock Xiaomi bootloader → custom shim → XNU → iPhone X iOS 16.7.16 userland; lock screen, SpringBoard, Settings and stock apps |
-| Touch | Goodix GT9896 touchscreen over GENI I²C, with RPMh power and HID digitizer events; gestures work |
+| Touch | `sweet`: Goodix GT9896 over GENI I²C, with RPMh power and HID events; gestures work. `toco`: Focaltech FTM5 over GENI I²C and its LDO6 power vote are ported; device validation is pending |
 | Hardware buttons | Power and volume buttons through PMIC/SPMI and HID consumer keys; lock/wake works |
 | GPU / Metal | Adreno 618 renders the iOS UI through native Metal. Animations are smoother than earlier builds, with no remaining visual bugs reported in current testing; stable 60 fps is still in progress |
 | Wi-Fi | WCN3990 scans, joins WPA2 networks, obtains a DHCP address and loads web pages. Active scanning: the network list appears instantly once the radio is up (boot daemon [`userspace/wifi/wland-0239`](userspace/wifi/wland-0239/README.md)). Known issue: on about 1 boot in 3 the modem firmware crashes right after start (Wi-Fi and SIM down until the next reboot) |
@@ -30,7 +30,7 @@ These are results from the development phone, not a compatibility guarantee for 
 | Sensors | The ADSP sensor hub (SEE) is up: accelerometer, gyroscope, light, proximity and magnetometer are found and stream into iOS's HID sensor services. Auto-rotate, auto-brightness and the Compass app do not work yet |
 | Storage | Custom UFS host driver; writable, journaled HFS+ iOS root in `userdata` |
 | CPU and memory | PSCI SMP bring-up, GICv3 interrupts and architectural timers; development builds also enable the Cortex-A76 cores. Approximately 3.95 GiB upper-bank RAM |
-| Display | IOSurface + IOMobileFramebuffer (`AppleCLCD`); iPhone X logical display scaled to the 1080×2400 panel |
+| Display | `sweet`: iPhone X logical display scaled to the 1080×2400 panel. `toco`: 1080×2340 physical panel selection and proportional scaling are ported; device validation is pending |
 | Device identity | iPhone X (`iPhone10,3` / `D22AP`), with gesture navigation |
 
 ## What changed to make this work
@@ -143,6 +143,14 @@ ipsw img4 im4p extract research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im
 
 Needs `aarch64-linux-gnu-gcc` and `mkbootimg`.
 
+The command below builds the default `sweet` image. For the experimental Mi Note 10 Lite target, unpack that phone's own stock `boot.img` to `dtb/boot_unpacked/dtb`, put the locally obtained GPU firmware in `research/gpu/fw/`, then run:
+
+```sh
+tools/toco-shim.sh xnu/out/kernel.development.sweet
+```
+
+The helper selects the 1080×2340 panel, packages the checked GPU firmware into the ADT, and builds a temporary-boot image. It does not flash a partition. Keep using the same iOS root image; touch and display scaling still require device-side verification on this target.
+
 ```sh
 python3 tools/mkadt.py shim/out/sweet.adt --highmem
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/sweet.adt shim/out/payload.bin \
@@ -196,7 +204,8 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `.github/workflows/wifi.yml`, `wifi-0239.yml` | `wland` builds: the ADSP speaker + sensor daemon (`userspace/wifi/patches`) and the Wi-Fi/cell boot daemon (`userspace/wifi/wland-0239`) |
 | `userspace/sensors/` | ADSP sensor-hub client (from ios-redfin, MIT) built into `wland` |
 | `docs/branches/` | Records of the 49 former side branches: tip hashes, test results, unmerged commits as patches |
-| `tools/mkadt.py` | Generates the Apple Device Tree from sweet's MMIO layout and the iPhone X identity |
+| `tools/mkadt.py` | Generates the Apple Device Tree from the shared SM7150 layout and the iPhone X identity; `SWEET_DEVICE=toco` selects the 1080×2340 panel |
+| `tools/toco-shim.sh` | Packages the kernel and local verified A618 firmware into a temporary Mi Note 10 Lite boot image |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
