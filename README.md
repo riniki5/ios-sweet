@@ -108,7 +108,10 @@ tools/toco-shim.sh xnu/out/kernel.development.sweet     # -> shim/out/shim-boot.
 The helper writes only under `shim/out` in the repository. The local firmware
 blobs are checksum-checked by `tools/sweet-adreno-firmware.py`, embedded into
 the boot ADT, then consumed by XNU when `sweetgpu=9` is enabled. Use
-`SWEET_GPU_STAGE=1` through `9` to select a diagnostic stage.
+`SWEET_GPU_STAGE=1` through `9` to select a diagnostic stage. To opt into the
+new `SweetNativeMetal.bundle` and the USB-only live file service, build with
+`SWEET_NATIVE_METAL=1 SWEET_FILE_SERVER=1`; this selects `sweetnative=1`
+and `sweetmtl=2` and enables `sweetfiles=1` for that boot.
 
 The CPU renderer is the frame-time limit on this panel, so the image can also report a smaller logical display: build the ADT with `SWEET_FB_W=828 SWEET_FB_H=1792` (iPhone XR class, 414×896 points at 2×) and boot with the matching `sweetfb_w=828 sweetfb_h=1792`. AppleCLCD then stretches the 828×1792 frames to 1080×2340. The ADT and the boot args must agree.
 
@@ -125,6 +128,8 @@ What the less obvious boot-args do:
 | `sweetfb_w=N sweetfb_h=N` | Render at a smaller logical size and stretch it to the panel (see above) |
 | `sweetusb=2` | USB device mode: CDC-ECM gadget plus the live kernel console as UDP to the host |
 | `sweetgpu=9` | Opt-in Adreno 618 firmware, GMU/HFI, SMMU, ZAP and CP bring-up. Requires the local firmware set above; a completed fence does not by itself qualify UI rendering |
+| `sweetnative=1 sweetmtl=2 sweetgles=0` | Select the direct AIR/freedreno `SweetNativeMetal` frontend. Install the matching iOS 16 bundle before selecting it |
+| `sweetfiles=1` | Opt-in root file access over the USB Ethernet gadget at `192.168.7.2:2223`; keep it disabled except while installing or restoring a bundle |
 | `sweettouch=0`, `sweetkeys=0` | Disable the touch or button driver |
 | `sweettouchdelay=N` | Start the touch thread N seconds after boot (default 45) |
 
@@ -168,6 +173,8 @@ A healthy touch log contains `SWEET TOUCH: panel 1080x2340 ... vddio=0x...`, `SW
 | `tools/mkadt.py` | Generates the Apple Device Tree (`SWEET_DEVICE=toco` for the 1080×2340 panel) |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
 | `tools/toco-shim.sh` | Builds a temporary-boot `shim-boot.img` with the toco ADT and local GPU firmware |
+| `tools/sweet-adreno-firmware.py` | Verifies and embeds locally supplied A618 firmware in the boot ADT |
+| `tools/sweet-files.py` | Transfers files through the opt-in USB-only live file service |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
 | `tools/sweet-log-pull.sh`, `sweet-log.py` | Read the persistent kernel log from recovery |
