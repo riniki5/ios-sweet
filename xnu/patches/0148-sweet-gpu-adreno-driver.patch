@@ -10693,11 +10693,12 @@ index 0000000..24aa905
 +/* 0x70000000.. holds the kernel's CP firmware/ring/fence (A618_CP_IOVA): the
 + * 0129 windows overlapped it and every extra BoMap was refused as Busy. */
 +enum : uint64_t {ExtraWindowStart=0x80000000,ExtraWindowBytes=0x10000000};
-+/* Processes that receive a Metal device besides backboardd. AegirPoster (the
-+ * configured iOS 16 wallpaper) aborts without one; sweetm2extra=0 disables. */
++/* Processes that draw system/app surfaces beside backboardd. SpringBoard owns
++ * its own CoreAnimation content; AegirPoster is the configured wallpaper.
++ * sweetm2extra=0 disables additional clients. */
 +bool extra_client(const char *name)
 +{
-+ static const char *const names[]={"AegirPoster"};
++ static const char *const names[]={"AegirPoster","SpringBoard"};
 + for(const char *n:names)if(!strcmp(name,n))return true;
 + return false;
 +}
