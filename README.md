@@ -112,6 +112,20 @@ the boot ADT, then consumed by XNU when `sweetgpu=9` is enabled. Use
 new `SweetNativeMetal.bundle` and the USB-only live file service, build with
 `SWEET_NATIVE_METAL=1 SWEET_FILE_SERVER=1`; this selects `sweetnative=1`
 and `sweetmtl=2` and enables `sweetfiles=1` for that boot.
+Download the `sweet-native-metal-ios16` workflow artifact, then install its
+bundle while that USB file service is running and before GPU discovery
+restarts `backboardd`:
+
+```sh
+python3 tools/sweet-install-native-metal.py install \
+    userspace/out/SweetNativeMetal.bundle work/native-metal-backup
+# Restore the saved bundle or remove files that the install added:
+python3 tools/sweet-install-native-metal.py restore work/native-metal-backup
+```
+
+The installer saves existing files and verifies each readback hash. Keep the
+backup directory so the bundle can be restored from a later boot with
+`SWEET_FILE_SERVER=1`.
 
 The CPU renderer is the frame-time limit on this panel, so the image can also report a smaller logical display: build the ADT with `SWEET_FB_W=828 SWEET_FB_H=1792` (iPhone XR class, 414×896 points at 2×) and boot with the matching `sweetfb_w=828 sweetfb_h=1792`. AppleCLCD then stretches the 828×1792 frames to 1080×2340. The ADT and the boot args must agree.
 
@@ -175,6 +189,7 @@ A healthy touch log contains `SWEET TOUCH: panel 1080x2340 ... vddio=0x...`, `SW
 | `tools/toco-shim.sh` | Builds a temporary-boot `shim-boot.img` with the toco ADT and local GPU firmware |
 | `tools/sweet-adreno-firmware.py` | Verifies and embeds locally supplied A618 firmware in the boot ADT |
 | `tools/sweet-files.py` | Transfers files through the opt-in USB-only live file service |
+| `tools/sweet-install-native-metal.py` | Installs the native Metal bundle with readback verification and a restore path |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
 | `tools/sweet-log-pull.sh`, `sweet-log.py` | Read the persistent kernel log from recovery |
