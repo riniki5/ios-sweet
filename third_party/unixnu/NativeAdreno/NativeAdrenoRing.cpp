@@ -67,6 +67,7 @@ static uint32_t ilog2(size_t value)
 /* The last submissions as the CP will read them: [slot] fence, start index, end index, word count, then up to 112 ring words from the start. The board log
  * prints them, so a fence the GPU never wrote can be compared with the packets that should have written it. */
 extern "C" {volatile uint32_t native_adreno_ring_log[4][4+112];volatile uint32_t native_adreno_ring_log_count;}
+extern "C" {volatile uint32_t native_adreno_ib_log[4][4+28];volatile uint32_t native_adreno_ib_log_count;}
 IOReturn NativeAdrenoRing::poison()
 {
     poisoned_=true;return kIOReturnIOError;
@@ -352,7 +353,50 @@ NativeAdrenoRingFence NativeAdrenoRing::wait(uint32_t fence,const NativeAdrenoRi
         if(value>=fence) {if(value>seqno_) {poison();return NativeAdrenoRingFencePoisoned;}completed_=value;
             return NativeAdrenoRingFenceComplete;}
         if(!clock || !clock->now_us)return NativeAdrenoRingFenceTimeout;
-        if(clock->now_us(clock->cookie)-start>=timeout_us)return NativeAdrenoRingFenceTimeout;
+        if(clock->now_us(clock->cookie)-start>=timeout_us) {
+            /* A timed-out GPU fence is the first real-rendering failure point.
+             * Capture the live A6xx ring/CP state while the backend lock is
+             * still held. These are read-only accesses; keep the report
+             * bounded so a wedged compositor cannot flood the persistent log. */
+            static unsigned reports=0;
+            const unsigned report=a6xx_?__atomic_fetch_add(&reports,1,__ATOMIC_RELAXED):4;
+            if(report<4) {
+                uint32_t hw_rptr=UINT32_MAX,hw_wptr=UINT32_MAX,control=UINT32_MAX,sqe=UINT32_MAX;
+                uint32_t irq=UINT32_MAX,hw_fault=UINT32_MAX,rbbm=UINT32_MAX,ahb=UINT32_MAX,cp2gmu=UINT32_MAX;
+                int e0=io_.read32(io_.cookie,RingRptr,&hw_rptr);
+                int e1=io_.read32(io_.cookie,RingWptr,&hw_wptr);
+                int e2=io_.read32(io_.cookie,RingControl,&control);
+                int e3=io_.read32(io_.cookie,0x808,&sqe);
+                int e4=io_.read32(io_.cookie,0x823,&irq);       /* CP_INTERRUPT_STATUS */
+                int e5=io_.read32(io_.cookie,0x821,&hw_fault);  /* CP_HW_FAULT */
+                int e6=io_.read32(io_.cookie,0x201,&rbbm);      /* RBBM_INT_0_STATUS */
+                int e7=io_.read32(io_.cookie,0x210,&ahb);       /* CP_AHB_BUSY */
+                int e8=io_.read32(io_.cookie,0x812,&cp2gmu);    /* CP_CP2GMU_STATUS */
+                IOLog("SWEET NATIVE ADRENO: fence timeout #%u target=%#x observed=%#x issued=%#x completed=%#x next=%#x shadow=%#x hw_rptr=%#x hw_wptr=%#x cntl=%#x sqe=%#x CP_INT=%#x CP_FAULT=%#x RBBM_INT=%#x AHB=%#x CP2GMU=%#x read_errors=%d/%d/%d/%d/%d/%d/%d/%d/%d\n",
+                    report+1,fence,value,seqno_,completed_,next_,a6xx_shadow_?*a6xx_shadow_:UINT32_MAX,
+                    hw_rptr,hw_wptr,control,sqe,irq,hw_fault,rbbm,ahb,cp2gmu,e0,e1,e2,e3,e4,e5,e6,e7,e8);
+                const uint32_t rc=native_adreno_ring_log_count;
+                if(rc) {
+                    const volatile uint32_t *record=native_adreno_ring_log[(rc-1)&3];
+                    const uint32_t words=record[3]<112?record[3]:112;
+                    IOLog("SWEET NATIVE ADRENO: ring record fence=%#x begin=%#x end=%#x words=%u\n",
+                        record[0],record[1],record[2],words);
+                    for(uint32_t i=0;i<words;i+=8)
+                        IOLog("SWEET NATIVE ADRENO: ring[%u]=%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x\n",
+                            i,record[4+i],i+1<words?record[5+i]:0,i+2<words?record[6+i]:0,
+                            i+3<words?record[7+i]:0,i+4<words?record[8+i]:0,i+5<words?record[9+i]:0,
+                            i+6<words?record[10+i]:0,i+7<words?record[11+i]:0);
+                }
+                const uint32_t ic=native_adreno_ib_log_count;
+                if(ic) {
+                    const volatile uint32_t *ib=native_adreno_ib_log[(ic-1)&3];
+                    IOLog("SWEET NATIVE ADRENO: IB fence=%#x iova=%#x:%#x bytes=%u first28=%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x,%#x\n",
+                        ib[0],ib[2],ib[1],ib[3],ib[4],ib[5],ib[6],ib[7],ib[8],ib[9],ib[10],ib[11],ib[12],ib[13],ib[14],ib[15],
+                        ib[16],ib[17],ib[18],ib[19],ib[20],ib[21],ib[22],ib[23],ib[24],ib[25],ib[26],ib[27],ib[28],ib[29],ib[30],ib[31]);
+                }
+            }
+            return NativeAdrenoRingFenceTimeout;
+        }
         if(clock->idle && clock->idle(clock->cookie))return NativeAdrenoRingFenceTimeout;
     }
 }
