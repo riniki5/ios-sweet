@@ -1,8 +1,9 @@
-## 2026-11-20: Toco hardware port to DC GPU branch (build pending)
-- User clarified the destination is this DC28088 tree: preserve its GPU/Metal and WCN3990 work, and bring in the Mi Note 10 Lite (`toco`) target and touch path from `riniki5/ios-sweet`.
-- Started from the fetched, cleaned `origin/main` tip `8514240` on `codex/toco-touch-port`; did not modify the Riniki checkout or its uncommitted notes/logs.
-- Port adds the Toco Focaltech FTM5/FTI touch path at I2C `0x49`, the PM6150L LDO6 3.0 V RPMh vote, ADT/shim selection for the 1080×2340 panel, proportional iPhone X framebuffer scaling, and a Toco boot-image helper that packages the repository's existing A618 GPU firmware flow.
-- Per-file patch-application checks pass for the Toco touch, HID, and framebuffer changes; shell syntax and ADT panel selection checks pass. The full XNU CI build and any device boot on the DC branch are still pending. Do not claim Toco GPU rendering or Wi-Fi on this port until device validation.
+## 2026-11-21: Toco touch confirmed; GPU handoff fix in progress
+- The fresh `riniki5/ios-sweet` fork is based on DC28088/ios-sweet. Branch `toco-gpu-port` adds the Toco panel and Focaltech touch port; CI runs 44906111615 and 44906113991 passed before the latest GPU change.
+- Persistent device logs confirm Focaltech events reach SWEET HID. The GPU ring adoption failed with EIO after the measured OPP boost was raised too early.
+- Apply the measured Toco fix from the prior device experiment: defer the high OPP raise until `sweet_native_adreno_adopt` succeeds. Earlier Toco logs showed `ready=1` with this ordering, but did not yet prove visible GPU rendering.
+- TWRP recovery log showed backlight brightness set to 0; restored sysfs brightness to 1200. No partitions were written.
+- NEXT: rebuild the kernel with deferred OPP, package a temporary Toco boot image, and inspect the next persistent GPU log for ring readiness before claiming renderer success.
 
 ## 2026-11-19 23:50 IST: kernel 2014 built; phone DIED (battery) before booting it
 - Kernel CI 44582763096 SUCCESS -> research/ios26/boot/kernel-44582763096 (2014 patch sha 3440109b matches the series).

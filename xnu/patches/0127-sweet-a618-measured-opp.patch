@@ -282,9 +282,9 @@ index 3aa7652..66fa3d8 100644
       cp.hw_fault, cp.fence, cp.value);
   printf("SWEET ADRENO: CP bootstrap complete errno=%d; iOS rendering ABI unavailable\n", error);
   if (!error) {
-+  sweet_gpu_raise_clock(core, gmu);
    extern int sweet_native_adreno_adopt(const struct a618_dma_region *, uintptr_t, uintptr_t, uintptr_t, unsigned);
    error = sweet_native_adreno_adopt(&memory, core, gmu, smmu, cp.fence);
++  if (!error) sweet_gpu_raise_clock(core, gmu);
    printf("SWEET ADRENO: NativeAdreno A618 handoff errno=%d; no userspace rendering\n", error);
 @@ -476,6 +598,7 @@ sweet_gpu_gmu_prepare(int stage)
          sweet_adreno_read((void *)smmu, 0x800 + slot * 4),
