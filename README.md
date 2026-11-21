@@ -151,6 +151,21 @@ tools/toco-shim.sh xnu/out/kernel.development.sweet
 
 The helper selects the 1080×2340 panel, packages the checked GPU firmware into the ADT, and builds a temporary-boot image. It does not flash a partition. Keep using the same iOS root image; touch and display scaling still require device-side verification on this target.
 
+`sweetgpu=9` enables the kernel's Adreno bring-up, but that alone does not enable GPU rendering in CoreAnimation. The helper defaults to the CPU renderer (`sweetnative=0`) until the matching bundle is installed. Build the bundle from this same checkout with the `sweet-native-metal` GitHub Actions workflow (or `python3 tools/build-sweet-native-metal.py` on macOS). While booted with `SWEET_FILE_SERVER=1`, install it with:
+
+```sh
+python3 tools/sweet-install-native-metal.py install \
+    userspace/out/SweetNativeMetal.bundle work/native-metal-backup
+```
+
+Keep the backup for rollback. Then build the temporary Toco image with the native frontend selected:
+
+```sh
+SWEET_NATIVE_METAL=1 tools/toco-shim.sh xnu/out/kernel.development.sweet
+```
+
+This setting only selects the renderer; the matching bundle must already be installed in the iOS root. If the GPU path fails, rebuild without `SWEET_NATIVE_METAL=1` to return to the CPU renderer. Do not flash the generated image; use `fastboot boot` for testing.
+
 ```sh
 python3 tools/mkadt.py shim/out/sweet.adt --highmem
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/sweet.adt shim/out/payload.bin \
