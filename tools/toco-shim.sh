@@ -34,5 +34,5 @@ python3 tools/sweet-adreno-firmware.py "$TMP/base.adt" "$FW_DIR/a618_gmu.bin" "$
     --zap-code-sha256 61be42f041eb6051eb9f56beb1f98ed97ab21faf2ef2df6b9151ba1a46aae878
 python3 tools/mkpayload.py "$K" "$TMP/gpu.adt" shim/out/payload.bin \
     --cmdline "debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=60 sweetusb=2 sweetgpu=$GPU_STAGE $RENDER_ARGS sweetfiles=$FILE_SERVER"
-SWEET_DEVICE=toco shim/build.sh ../shim/out/payload.bin
+SWEET_DEVICE=toco sh shim/build.sh ../shim/out/payload.bin
 echo "shim/out/shim-boot.img ready (toco ADT + Adreno firmware, sweetgpu=$GPU_STAGE, sweetnative=$NATIVE_METAL, sweetfiles=$FILE_SERVER): fastboot boot shim/out/shim-boot.img"
