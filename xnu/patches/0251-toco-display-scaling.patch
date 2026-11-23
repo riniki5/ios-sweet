@@ -1,0 +1,89 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -182,8 +182,7 @@
+ 	}
+ }
+ 
+-/* sweetfb_mode=3: the presented 1125x2436 is scaled onto the 1080x2400 panel (SweetHID maps touch
+- * the same way: the whole display is the whole panel). */
++/* sweetfb_mode=3 maps the iPhone X logical canvas onto the full native panel. */
+ extern "C" bool
+ sweet_fb_scaled(void)
+ {
+@@ -193,18 +192,17 @@
+ 	return !native && mode == 3;
+ }
+ 
+-/* Panel column -> presented column: 25 presented columns over every 24 panel ones. */
++/* Map native panel pixels to the presented logical canvas (sweet or toco). */
+ static inline int32_t
+-sweet_fb_scaled_col(int32_t px)
+-{
+-	return px + px / 24;
+-}
+-
+-/* Panel row -> presented row: 2436 over 2400, py + floor(36 py / 2400). */
++sweet_fb_scaled_col(int32_t px, uint32_t panel_w, uint32_t logical_w)
++{
++	return (int32_t)(((int64_t)px * logical_w) / panel_w);
++}
++
+ static inline int32_t
+-sweet_fb_scaled_row(int32_t py)
+-{
+-	return py + (py * 3) / 200;
++sweet_fb_scaled_row(int32_t py, uint32_t panel_h, uint32_t logical_h)
++{
++	return (int32_t)(((int64_t)py * logical_h) / panel_h);
+ }
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
+ 
+@@ -2362,35 +2360,37 @@
+ AppleCLCD::copyScaled(uintptr_t src, uint32_t srcBpr, int32_t lx, int32_t ly, int32_t lw, int32_t lh)
+ {
+ 	/* First panel column/row whose presented column/row is >= lx/ly, and the end ones. */
+-	int32_t px0 = (lx * 24 + 24) / 25, px1 = ((lx + lw) * 24 + 24) / 25;
+-	int32_t py0 = (ly * 200 + 202) / 203, py1 = ((ly + lh) * 200 + 202) / 203;
+-	while (px0 > 0 && sweet_fb_scaled_col(px0 - 1) >= lx) {
++	int32_t px0 = (int32_t)(((int64_t)lx * fWidth + fLogicalW - 1) / fLogicalW);
++	int32_t px1 = (int32_t)(((int64_t)(lx + lw) * fWidth + fLogicalW - 1) / fLogicalW);
++	int32_t py0 = (int32_t)(((int64_t)ly * fHeight + fLogicalH - 1) / fLogicalH);
++	int32_t py1 = (int32_t)(((int64_t)(ly + lh) * fHeight + fLogicalH - 1) / fLogicalH);
++	while (px0 > 0 && sweet_fb_scaled_col(px0 - 1, fWidth, fLogicalW) >= lx) {
+ 		px0--;
+ 	}
+-	while (px0 < (int32_t)fWidth && sweet_fb_scaled_col(px0) < lx) {
++	while (px0 < (int32_t)fWidth && sweet_fb_scaled_col(px0, fWidth, fLogicalW) < lx) {
+ 		px0++;
+ 	}
+-	while (px1 > px0 && sweet_fb_scaled_col(px1 - 1) >= lx + lw) {
++	while (px1 > px0 && sweet_fb_scaled_col(px1 - 1, fWidth, fLogicalW) >= lx + lw) {
+ 		px1--;
+ 	}
+-	while (py0 > 0 && sweet_fb_scaled_row(py0 - 1) >= ly) {
++	while (py0 > 0 && sweet_fb_scaled_row(py0 - 1, fHeight, fLogicalH) >= ly) {
+ 		py0--;
+ 	}
+-	while (py0 < (int32_t)fHeight && sweet_fb_scaled_row(py0) < ly) {
++	while (py0 < (int32_t)fHeight && sweet_fb_scaled_row(py0, fHeight, fLogicalH) < ly) {
+ 		py0++;
+ 	}
+-	while (py1 > py0 && sweet_fb_scaled_row(py1 - 1) >= ly + lh) {
++	while (py1 > py0 && sweet_fb_scaled_row(py1 - 1, fHeight, fLogicalH) >= ly + lh) {
+ 		py1--;
+ 	}
+ 	px1 = px1 > (int32_t)fWidth ? (int32_t)fWidth : px1;
+ 	py1 = py1 > (int32_t)fHeight ? (int32_t)fHeight : py1;
+ 	for (int32_t py = py0; py < py1; py++) {
+-		const uintptr_t srow = src + (uint64_t)(sweet_fb_scaled_row(py) - ly) * srcBpr;
++		const uintptr_t srow = src + (uint64_t)(sweet_fb_scaled_row(py, fHeight, fLogicalH) - ly) * srcBpr;
+ 		uint8_t *drow = (uint8_t *)(fDraw + (uint64_t)py * fRowBytes);
+ 		for (int32_t px = px0; px < px1;) {
+ 			int32_t end = (px / 24 + 1) * 24;
+ 			end = end > px1 ? px1 : end;
+-			memcpy(drow + (uint64_t)px * 4, (const void *)(srow + (uint64_t)(sweet_fb_scaled_col(px) - lx) * 4),
++			memcpy(drow + (uint64_t)px * 4, (const void *)(srow + (uint64_t)(sweet_fb_scaled_col(px, fWidth, fLogicalW) - lx) * 4),
+ 			    (size_t)(end - px) * 4);
+ 			px = end;
+ 		}

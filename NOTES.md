@@ -1,3 +1,10 @@
+## 2026-11-23: Toco hardware port to DC28088 base (SM7150 / Snapdragon 730G)
+- Port Mi Note 10 Lite (`toco`) hardware to DC28088 native Metal / SM7150 base repository:
+  * Panel resolution: 1080x2340 (vs sweet 1080x2400) - adapted `mkadt.py`, framebuffer scaling, and SweetHID digitizer dimensions.
+  * Touchscreen: FocalTech FTM5/FTI touch path at I2C 0x49 on QUP SE7 (0xa84000), PM6150L LDO6 3.0V RPMh vote, IRQ GPIO 9, Reset GPIO 8.
+  * Buttons: PM6150 PON (Power / Vol-) + PM6150L GPIO 2 (Vol+).
+  * USB: DWC3 controller at 0x0a600000 for CDC-ECM networking / live kernel console.
+
 ## 2026-11-23 21:05 IST: MILESTONE: Mav20 ABM BOOTS the baseband ("Booting -> Booted", 26bQ / xnu 2016); NAS then times out
 - 26bQ = kernel CI 45198061886 (2016 strings present, SHA256SUMS OK) + 26bP cmdline with sweetbuild=2680, ADT wbgb:
   research/ios26/boot/shim-boot-26bQ.img 5050bd0e (ramdisk == payload; shim/dtb == 26bP's). `sweetreboot fastboot`

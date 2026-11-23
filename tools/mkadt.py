@@ -3,6 +3,8 @@
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
 address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+
+SWEET_DEVICE selects the panel: sweet (1080x2400) or toco (1080x2340).
 """
 import hashlib, os, struct, sys
 
@@ -30,7 +32,13 @@ SWEET_MG_MACS = {
     'mac-address-bluetooth0': bytes.fromhex('025357454555'),
     'mac-address-ethernet0': bytes.fromhex('02005e77ee02'),
 }
-FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
+# Both supported boards use the SM7150 memory map and ABL framebuffer. The
+# Mi Note 10 Lite (toco) panel is 60 rows shorter than the Redmi Note 10 Pro.
+PANEL_H = {'sweet': 2400, 'toco': 2340}
+DEVICE = os.environ.get('SWEET_DEVICE', 'sweet')
+if DEVICE not in PANEL_H:
+    raise SystemExit(f'unknown SWEET_DEVICE={DEVICE!r} (expected {", ".join(PANEL_H)})')
+FB_W, FB_H, FB_STRIDE = 1080, PANEL_H[DEVICE], 1080 * 4
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
