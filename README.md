@@ -6,7 +6,7 @@ This tree ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation)
 
 It is a fork of [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet), the Redmi Note 10 Pro (`sweet`) port, and keeps its patch series. Patch 0082 adds the `toco` hardware: the 1080×2340 panel, the Focaltech FTM5 touch controller and its PM6150L LDO6 rail vote in the RPMh driver. The same kernel, shim and iOS root boot both phones.
 
-As of **2026-11-20** the phone boots to iOS, and the touchscreen and hardware buttons work. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup, and a CP fence have now completed on the toco device. The graphics provider is published afterward, but UI rendering through the GPU is not yet qualified; the display may stay on the Apple loading logo while iOS starts.
+As of **2026-11-26** the phone boots to iOS, and the touchscreen and hardware buttons work. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup, and a CP fence have completed on the toco device. The strict patch series now defaults to the proven 267 MHz corner and publishes NativeAdreno only after clock and render-profile qualification; full kernel CI and on-device rendering are still pending, so the display may remain on the Apple loading logo while iOS starts.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
@@ -30,8 +30,8 @@ As of **2026-11-20** the phone boots to iOS, and the touchscreen and hardware bu
 
 ## What does not work (yet)
 
-- **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS or SEP / Face ID.** Wi-Fi and Bluetooth are a Qualcomm WCN3990 combo behind `icnss`, with firmware loaded through the modem subsystem and an IPA data path: a port needs firmware loading (PIL), SMEM/SMP2P, QMI + WMI and a full driver. Daemons for these start and fail or keep relaunching.
-- **GPU UI rendering is not yet qualified.** The kernel reaches CP fence completion and publishes the NativeAdreno service, but a successful on-screen Metal draw and responsive UI have not yet been confirmed. Keep the GPU opt-in and preserve the working touch path while validating the matching userspace bundle.
+- **Wi-Fi is integrated but not yet hardware-qualified.** The WCN3990 kernel transport and pinned iOS 16 `wland`/`netsvc` stack are in the tree; the exact userspace artifact, installation, and a scan/join test remain. Bluetooth, cellular, audio, camera, sensors, GPS and SEP / Face ID are still unavailable.
+- **GPU UI rendering is not yet qualified.** The kernel reaches CP fence completion, but NativeAdreno is published only after strict clock and render-profile checks; a successful on-screen Metal draw and responsive UI have not yet been confirmed. Keep the GPU opt-in and preserve the working touch path while validating the matching userspace bundle.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty. Several apps show a black window (Phone, Photos, Messages) because they need hardware we do not have.
 - **Slow boot:** about 90 seconds on the Apple logo, against a few seconds on a real iPhone.
 - **Security is off:** permissive code signing (AMFI) and sandbox policies, a stub AppleKeyStore, no data protection. Do not put anything personal on it.
@@ -108,7 +108,10 @@ tools/toco-shim.sh xnu/out/kernel.development.sweet     # -> shim/out/shim-boot.
 The helper writes only under `shim/out` in the repository. The local firmware
 blobs are checksum-checked by `tools/sweet-adreno-firmware.py`, embedded into
 the boot ADT, then consumed by XNU when `sweetgpu=9` is enabled. Use
-`SWEET_GPU_STAGE=1` through `9` to select a diagnostic stage. To opt into the
+`SWEET_GPU_STAGE=1` through `9` to select a diagnostic stage. The shim defaults
+to the proven `sweetgpukhz=267000` corner; set `SWEET_GPU_KHZ` to another
+supported A618 OPP only for testing, and NativeAdreno publication still requires
+a nonzero measured GX clock plus exact render-profile readback. To opt into the
 new `SweetNativeMetal.bundle` and the USB-only live file service, build with
 `SWEET_NATIVE_METAL=1 SWEET_FILE_SERVER=1`; this selects `sweetnative=1`
 and `sweetmtl=2` and enables `sweetfiles=1` for that boot.
@@ -127,7 +130,34 @@ The installer saves existing files and verifies each readback hash. Keep the
 backup directory so the bundle can be restored from a later boot with
 `SWEET_FILE_SERVER=1`.
 
-The CPU renderer is the frame-time limit on this panel, so the image can also report a smaller logical display: build the ADT with `SWEET_FB_W=828 SWEET_FB_H=1792` (iPhone XR class, 414×896 points at 2×) and boot with the matching `sweetfb_w=828 sweetfb_h=1792`. AppleCLCD then stretches the 828×1792 frames to 1080×2340. The ADT and the boot args must agree.
+Wi-Fi uses the pinned iOS 16 `wland`/`netsvc` build from the
+`sweet-wifi-0239` workflow and kernel patches `0157`–`0159`. Install the
+binaries, launchd job, and locally obtained modem/WLAN firmware before building
+with `SWEET_WIFI=1`; `SWEET_FILE_SERVER=1` can be used only while installing
+them. This enables root-only `/dev/pmem` and the kernel-programmed WLAN SMMU
+stream. Protected-network credential persistence is not implemented; use open
+or otherwise non-sensitive test networks during bring-up.
+
+Boot once with `SWEET_FILE_SERVER=1`, then install the workflow artifact and
+locally obtained toco firmware without reflashing `userdata`:
+
+```sh
+python3 tools/sweet-install-wifi.py install \
+    --binaries userspace/out/sweet-wifi-ios16 \
+    --firmware research/wifi/fw \
+    --rmtfs research/wifi/rmtfs \
+    --backup work/wifi-backup
+# From a later file-server boot, roll back with:
+python3 tools/sweet-install-wifi.py restore --backup work/wifi-backup
+```
+
+The firmware directory must contain the toco `modem.*`, `modemr.jsn`,
+`wlanmdsp.mbn`, `modemuw.jsn`, and matching `bdwlan.*` files. The RMTFS directory
+must contain `modemst1.img`, `modemst2.img`, `fsg.img`, and `fsc.img`. The
+installer backs up every replaced file and the launchd plist, verifies each
+readback hash, and installs `org.ios-sweet.wland` to run `wland auto` at boot.
+
+The CPU renderer is the frame-time limit on this panel, so `tools/toco-shim.sh` reports a smaller logical display by default: 828×1792 (iPhone XR class, 414×896 points at 2×). It passes the same dimensions to the ADT and the `sweetfb_w`/`sweetfb_h` boot args, and AppleCLCD stretches the frames to 1080×2340. Override both dimensions together with `SWEET_FB_W`/`SWEET_FB_H`; `SWEET_FB_SCALE` controls the ADT scale. The ADT and the boot args must agree.
 
 What the less obvious boot-args do:
 
@@ -142,8 +172,10 @@ What the less obvious boot-args do:
 | `sweetfb_w=N sweetfb_h=N` | Render at a smaller logical size and stretch it to the panel (see above) |
 | `sweetusb=2` | USB device mode: CDC-ECM gadget plus the live kernel console as UDP to the host |
 | `sweetgpu=9` | Opt-in Adreno 618 firmware, GMU/HFI, SMMU, ZAP and CP bring-up. Requires the local firmware set above; a completed fence does not by itself qualify UI rendering |
+| `sweetgpukhz=267000` | GPU OPP ceiling; the toco default is the proven 267 MHz corner. Higher values are opt-in and must pass clock/profile qualification |
 | `sweetnative=1 sweetmtl=2 sweetgles=0` | Select the direct AIR/freedreno `SweetNativeMetal` frontend. Install the matching iOS 16 bundle before selecting it |
 | `sweetfiles=1` | Opt-in root file access over the USB Ethernet gadget at `192.168.7.2:2223`; keep it disabled except while installing or restoring a bundle |
+| `sweetpmem=1 sweetsmmuprobe=1 sweetsmmuwlan=1` | Enable the root-only physical-memory device, apps-SMMU probe, and kernel-programmed WCN3990 stream for `wland`; selected by `SWEET_WIFI=1` |
 | `sweettouch=0`, `sweetkeys=0` | Disable the touch or button driver |
 | `sweettouchdelay=N` | Start the touch thread N seconds after boot (default 45) |
 
@@ -155,7 +187,7 @@ fastboot -S 512M flash userdata ios16-root.simg   # WIPES Android's user data; ~
 fastboot boot shim/out/shim-boot.img
 ```
 
-The first boot takes about 90 seconds on the Apple logo, then the lock screen appears. Swipe up to unlock. Swipe up to unlock. To get back to fastboot, hold Power + Volume down.
+The first boot takes about 90 seconds on the Apple logo, then the lock screen appears. Swipe up to unlock. To get back to fastboot, hold Power + Volume down.
 
 ### 5. Read the kernel log
 
@@ -190,6 +222,8 @@ A healthy touch log contains `SWEET TOUCH: panel 1080x2340 ... vddio=0x...`, `SW
 | `tools/sweet-adreno-firmware.py` | Verifies and embeds locally supplied A618 firmware in the boot ADT |
 | `tools/sweet-files.py` | Transfers files through the opt-in USB-only live file service |
 | `tools/sweet-install-native-metal.py` | Installs the native Metal bundle with readback verification and a restore path |
+| `tools/sweet-install-wifi.py` | Installs `wland`, `netsvc`, toco firmware, RMTFS images and the launchd job with rollback |
+| `userspace/wifi/wland-0239/`, `.github/workflows/wifi-0239.yml` | Validated iOS 16 WCN3990 userspace patch series and pinned build workflow |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
 | `tools/sweet-log-pull.sh`, `sweet-log.py` | Read the persistent kernel log from recovery |
@@ -231,6 +265,8 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0083–0084 | Adreno 618 GPUCC: GCC/GPUCC branch clocks and the CX power domain, register dump (`gpu=1`) |
 | 0085–0086 | RPMh ARC votes for `cx.lvl`/`mx.lvl`/`gfx.lvl`: cmd-db lookup plus a single level-index write on the ARC slave, so the GX domain powers up (`gpu_gx=1`) |
 | 0087 | GPU PLL0 (Fabia) start and the GX_GFX3D root clock switched to `crc_div`, so the core is clocked before its registers are read |
+| 0148–0155 | DC28088 NativeAdreno/Metal stack for A618, strict 267 MHz clock qualification, ring-adoption and render-readback checks, and submission-stall diagnostics |
+| 0157–0159 | WCN3990 `/dev/pmem` + `/dev/wlan` transport, bounded RPMh Wi-Fi votes, and the kernel-programmed WLAN SMMU stream |
 
 ## Key hardware facts
 

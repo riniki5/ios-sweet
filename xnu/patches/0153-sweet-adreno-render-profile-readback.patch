@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp b/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
 --- a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
 +++ b/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp
-@@ -36,15 +36,20 @@
+@@ -36,15 +36,21 @@
   for(const auto &entry:setup) {
    core[entry.reg]=entry.value;
    __asm__ volatile("dsb sy":::"memory");
@@ -14,14 +14,15 @@ diff --git a/iokit/Kernel/arm/SweetNativeAdrenoRender.cpp b/iokit/Kernel/arm/Swe
 -   IOLog("SWEET RENDER: reg=%#x expected=%#x read=%#x\n",entry.reg,entry.value,value);return 1;
 +   for(unsigned retry=0; retry<100 && value==0; retry++) {IODelay(100); core[entry.reg]=entry.value; __asm__ volatile("dsb sy":::"memory"); value=core[entry.reg];}
 +   if((value&entry.mask)!=(entry.value&entry.mask)) {
-+    IOLog("SWEET RENDER: reg=%#x expected=%#x read=%#x (continuing)\n",entry.reg,entry.value,value);
++    IOLog("SWEET RENDER: reg=%#x expected=%#x read=%#x\n",entry.reg,entry.value,value);return 1;
 +   }
    }
   }
 - if(core[0x084f]!=0xb || core[0x0e09]!=0xfffff000 || core[0x0e0a]!=0x1ffff)return 1;
 + const uint32_t r84f=core[0x084f], re09=core[0x0e09], re0a=core[0x0e0a];
-+ if(r84f!=0xb || re09!=0xfffff000 || re0a!=0x1ffff)
-+  IOLog("SWEET RENDER: fixed reg readback 0x84f=%#x 0xe09=%#x 0xe0a=%#x (continuing)\n",r84f,re09,re0a);
++ if(r84f!=0xb || re09!=0xfffff000 || re0a!=0x1ffff) {
++  IOLog("SWEET RENDER: fixed reg readback 0x84f=%#x 0xe09=%#x 0xe0a=%#x\n",r84f,re09,re0a);return 1;
++ }
   *info={0x06010800,512u*1024u,0x100000,UINT64_C(0x1fffffffff000),
       UINT64_C(0x40000000),UINT64_C(0x30000000),14,6,0,2,NativeAdrenoDeviceClientIova,0};
   IOLog("SWEET RENDER: A618 PERFSEL legacy selector=1 accepted\n");

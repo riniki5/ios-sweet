@@ -11,7 +11,8 @@ FILTER     only compile sources whose path contains one of these strings
 Edit the sources under BUILDTREE/xnu, re-run, and turn the result into
 patches with `git diff` there. Uses the local Apple-fork clang (swiftlang).
 
-Env: XNU_CC_EXTRA   extra flags (e.g. "-DKPERF -DKPC" for config changes)
+Env: XNU_CC_CLANG   compiler path (default: ~/swift/usr/bin/clang)
+     XNU_CC_EXTRA   extra flags (e.g. "-DKPERF -DKPC" for config changes)
      XNU_CC_POST    flags appended after the original ones (like a per-object
                     _CFLAGS_ADD in the xnu Makefiles: -U/-include after -D)
      XNU_CC_OBJDIR  emit real objects there instead of a syntax-only check
@@ -22,7 +23,7 @@ from collections import Counter
 
 CI_DXB = '/Users/runner/work/ios-sweet/ios-sweet/dxb'
 CI_SDK_PLATFORM = re.compile(r'/Applications/Xcode[^ ]*?\.sdk/+System/Library/Frameworks/Kernel\.framework/Versions/A/PrivateHeaders/platform')
-CLANG = os.path.expanduser('~/swift/usr/bin/clang')
+CLANG = os.environ.get('XNU_CC_CLANG', os.path.expanduser('~/swift/usr/bin/clang'))
 DROP = {'-c', '-g', '-MD', '-MMD'}
 DROP_WITH_ARG = {'-MF', '-MT', '-o', '-arch'}
 COMPONENTS = ('osfmk', 'bsd', 'iokit', 'libkern', 'pexpert', 'security', 'san', 'libsa')
@@ -63,7 +64,7 @@ def makefile_sources(bt):
             for f in m.group(1).split():
                 f = f.replace('$(SOURCE_DIR)', CI_DXB + '/xnu')
                 if f.startswith('./'):	# generated (iig, yacc) in the build dir
-                    f = os.path.join(root.replace(bt, CI_DXB), f[2:])
+                    f = os.path.join(root.replace(bt, CI_DXB), f[2:]).replace(os.sep, '/')
                 out.append(f)
     return out
 
@@ -83,8 +84,9 @@ def component_dirs(bt):
     out = {}
     for root, _, files in os.walk(os.path.join(bt, 'build/xnu.obj')):
         if 'meta_features.h' in files:
+            normalized = root.replace(os.sep, '/')
             for c in COMPONENTS:
-                if f'/{c}/' in root + '/' and c not in out:
+                if f'/{c}/' in normalized + '/' and c not in out:
                     out[c] = root
     return out
 
@@ -107,7 +109,7 @@ def run(item, bt, cdirs):
         if a in DROP_WITH_ARG:
             skip = True
             continue
-        a = CI_SDK_PLATFORM.sub(os.path.join(bt, 'sdk-kernel-platform/platform'), a)
+        a = CI_SDK_PLATFORM.sub(lambda _: os.path.join(bt, 'sdk-kernel-platform/platform'), a)
         new.append(a.replace(CI_DXB, bt))
     new += os.environ.get('XNU_CC_POST', '').split()
     comp = next((c for c in COMPONENTS if f'/xnu/{c}/' in src), None) or \

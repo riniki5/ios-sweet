@@ -2057,10 +2057,10 @@ index 0000000..e27c05c
 +}
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
-index b1df2ef..638a4d5 100644
+index b1df2ef..11980b44 100644
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
-@@ -1,5865 +1,808 @@
+@@ -1,5865 +1,814 @@
  /*
 - * SWEET Adreno 618 (a615, kgsl chipid 0x06010800) power probe.
 - * Call once after the scheduler is running; boot arg gpu=1.
@@ -3178,7 +3178,8 @@ index b1df2ef..638a4d5 100644
 + * Bring-up still runs at index 1 (267MHz, the proven corner). After the CP
 + * fence succeeds the APPS gfx/mx floors are raised for the chosen level, the
 + * GX clock is measured, DCVS selects it, and the clock is measured again.
-+ * sweetgpukhz=267000 keeps the previous single-level behaviour.
++ * sweetgpukhz defaults to the proven 267000 single-level corner; higher
++ * corners are opt-in and must pass the measured-clock qualification.
 + */
 +static const struct { uint32_t khz, level; } sweet_gpu_opps[] = {
 +	{ 267000u, 64u },       /* LOW_SVS */
@@ -3208,7 +3209,7 @@ index b1df2ef..638a4d5 100644
 -		*keep = cfg;
 +sweet_gpu_levels_prepare(void)
 +{
-+	uint32_t target = 800000u;
++	uint32_t target = 267000u;
 +	PE_parse_boot_argn("sweetgpukhz", &target, sizeof(target));
 +	a618_gpu_level_count = 0;
 +	unsigned count = 0;
@@ -4425,8 +4426,9 @@ index b1df2ef..638a4d5 100644
 - * enables. Without them the CM3 may wait on an RPMh sequencer that the power
 - * config never armed.
 - */
- static void
+-static void
 -gpu_gmu_prestart(void)
++static int
 +sweet_gpu_raise_clock(vm_offset_t core, vm_offset_t gmu)
  {
 -	int gbif = 0, clk = 0, pc = 0, rails = 0, sm = 0;
@@ -4508,7 +4510,7 @@ index b1df2ef..638a4d5 100644
 +	printf("SWEET ADRENO: GX clock measured=%u kHz at perf index 1 (configured %u kHz)\n",
 +	    before, a618_gpu_level_count ? a618_gpu_levels[0].khz : 267000u);
 +	if (a618_gpu_level_count < 2) {
-+		return;
++		return sweet_gpu_measure_khz(core) ? 0 : EIO;
  	}
 -}
 -
@@ -4674,7 +4676,7 @@ index b1df2ef..638a4d5 100644
 -		}
 +	if (error) {
 +		printf("SWEET ADRENO: APPS rail floor errno=%d; GX stays at perf index 1\n", error);
-+		return;
++		return error;
  	}
 -	printf("SWEET GPU: scan done hits=%d\n", hits);
 -	(void)sweet_log_sync();
@@ -4691,6 +4693,7 @@ index b1df2ef..638a4d5 100644
 +		printf("SWEET ADRENO: DCVS restore index 1 errno=%d measured=%u kHz\n",
 +		    back, sweet_gpu_measure_khz(core));
 +	}
++	return !error && after ? 0 : (error ? error : EIO);
 +}
 +
 +static int
@@ -4852,7 +4855,11 @@ index b1df2ef..638a4d5 100644
 +     cp.hw_fault, cp.fence, cp.value);
 + printf("SWEET ADRENO: CP bootstrap complete errno=%d; iOS rendering ABI unavailable\n", error);
 + if (!error) {
-+  sweet_gpu_raise_clock(core, gmu);
++  error = sweet_gpu_raise_clock(core, gmu);
++  if (error) {
++   printf("SWEET ADRENO: clock qualification failed errno=%d; NativeAdreno handoff refused\n", error);
++   return error;
++  }
 +  extern int sweet_native_adreno_adopt(const struct a618_dma_region *, uintptr_t, uintptr_t, uintptr_t, unsigned);
 +  error = sweet_native_adreno_adopt(&memory, core, gmu, smmu, cp.fence);
 +  printf("SWEET ADRENO: NativeAdreno A618 handoff errno=%d; no userspace rendering\n", error);
@@ -10635,10 +10642,10 @@ index 0000000..109fa6f
 +}
 diff --git a/iokit/Kernel/arm/SweetNativeAdrenoClient.cpp b/iokit/Kernel/arm/SweetNativeAdrenoClient.cpp
 new file mode 100644
-index 0000000..24aa905
+index 0000000..25f901ec
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetNativeAdrenoClient.cpp
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,650 @@
 +/* SPDX-License-Identifier: MIT
 + * IOKit transport for the real NativeAdreno ABI. One compositor connection,
 + * one resource gate, synchronous quiescence before VM edits/cache publication.

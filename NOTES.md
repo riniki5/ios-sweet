@@ -1,3 +1,77 @@
+# Current toco status — 2026-11-26
+
+## Current target
+
+- iOS 16.7.16 / XNU 8796.141.3 on the Xiaomi Mi Note 10 Lite (`toco`, SM7150G, Adreno 618/a615).
+- Repository: `riniki5/ios-sweet`.
+- Active branch: `codex/springboard-gpu-access`.
+- Priorities: boot reliability, GPU-rendered UI at 60 FPS, then WCN3990 Wi-Fi. Wallpaper work is paused.
+
+## Verified local state
+
+- Reconstructed the exact post-0147/pre-0148 baseline. `sweet_gpu.c` SHA-1: `b1df2efd393ef6703516802cc14024c76afac604`.
+- Replayed `0148`, `0151`, strict `0153`, `0155`, `0157`, `0158`, and `0159` successfully.
+- The replayed integrated tree matches the compiled tree across 31 GPU/Wi-Fi source files after line-ending normalization.
+- Compiled 23 Adreno sources and 9 Wi-Fi sources into real Mach-O arm64 objects: zero failures.
+- Internal symbol closure: 112 references, 112 resolved, zero missing across the 32-object set.
+- Strict GPU behavior: 267 MHz default, nonzero GX measurement required, DCVS errors or zero post-transition clock refuse NativeAdreno handoff, exact render-profile readback required, zero-register ring fallback removed.
+- Wi-Fi userspace patches `0001`-`0007` match the pinned donor result hashes. The workflow preflights all required sources and no longer lists nonexistent `servreg.c`.
+- Validated installer payload outside git: 71 files, 92,123,237 bytes; 65 firmware/BDF files, 4 RMTFS images, and 2 binary slots. Donor binaries in that validation payload are reference-only and must not be installed.
+
+## Hardware evidence
+
+- The proven toco GPU corner is 267 MHz; the measured pre-DCVS clock was 266999 kHz.
+- An 800 MHz DCVS request returned success, changed GPUCC PLL0, but left GX measured at 0 kHz and the gfx3d RCG registers unchanged.
+- NativeAdreno then failed render-profile readback at register `0x0c01` and refused userspace rendering.
+- This points to the post-DCVS GNX/GPU clock and power transition, not the GMEM table itself.
+
+## Active blockers
+
+- Full current-HEAD XNU build and kernel link have not run yet.
+- The exact patched `wland`/`netsvc` artifact has not been built by `sweet-wifi-0239` yet.
+- No Wi-Fi binaries, launchd job, firmware, or RMTFS images have been installed on the phone.
+- Shader/GMEM execution and the NativeAdreno/Metal userspace ABI remain unqualified on hardware.
+- Protected Wi-Fi credential persistence is not implemented; bring-up must use open or non-sensitive networks.
+- The file service has no `STAT` command, so Wi-Fi restore preserves contents and intended modes but not arbitrary pre-existing permission modes.
+
+## Safety rules
+
+- Never flash `boot`, `dtbo`, or `recovery`.
+- Test kernels only with `fastboot boot shim-boot.img`.
+- Ask for explicit confirmation immediately before any `fastboot flash userdata`; it erases internal storage.
+- Preserve Android, bootloaders, recovery, modem, persist, calibration data, and all partition backups.
+- Keep device dumps, serial numbers, Apple artifacts, proprietary firmware, credentials, personal identifiers, and raw device logs out of git.
+- Do not upload Apple shader inputs or proprietary firmware to public CI.
+
+## Next build and boot
+
+```sh
+gh workflow run xnu.yml -R riniki5/ios-sweet --ref codex/springboard-gpu-access
+gh workflow run wifi-0239.yml -R riniki5/ios-sweet --ref codex/springboard-gpu-access
+```
+
+After both workflows pass, download and verify their artifacts, then package the exact kernel:
+
+```sh
+SWEET_GPU_KHZ=267000 SWEET_WIFI=0 SWEET_FILE_SERVER=1 \
+  tools/toco-shim.sh xnu/out/kernel.development.sweet
+fastboot boot shim/out/shim-boot.img
+```
+
+Do not boot older scratch shims: they still contain the 800 MHz default, permissive ring adoption, or both.
+
+## Scratch artifacts outside git
+
+- `work-toco/gpu-strict-obj-45208283340/`: strict Adreno object set.
+- `work-toco/wifi-obj-45208283340/`: Wi-Fi kernel object set.
+- `work-toco/integrated-series-check2/`: exact patch-series replay tree.
+- `work-toco/wifi-payload-validation.json`: staged payload manifest.
+- `work-toco/xnu-run-45208283340/`: downloaded CI buildtree used for compile-command replay; not a complete linkable tree.
+
+---
+
+# Historical engineering log
+
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 ## Toco port handoff (2026-11-15, latest)
