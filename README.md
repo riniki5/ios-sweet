@@ -158,8 +158,9 @@ must contain `modemst1.img`, `modemst2.img`, `fsg.img`, and `fsc.img`. The
 installer verifies the pinned donor commit, patch hashes, binary hashes and
 `SHA256SUMS` before contacting the phone. It backs up every replaced file and
 the launchd plist, verifies each readback hash, and installs
-`org.ios-sweet.wland` to run `wland auto` at boot. Launchd retries only failures
-from before modem PAS; it never automatically boots the modem twice in one boot.
+`org.ios-sweet.wland` to run `wland auto` at boot. Boot-stamp write failures
+refuse startup. Launchd retries only failures from before modem PAS; it never
+automatically boots the modem twice in one boot.
 
 The CPU renderer is the frame-time limit on this panel, so `tools/toco-shim.sh` reports a smaller logical display by default: 828×1792 (iPhone XR class, 414×896 points at 2×). It passes the same dimensions to the ADT and the `sweetfb_w`/`sweetfb_h` boot args, and AppleCLCD stretches the frames to 1080×2340. Override both dimensions together with `SWEET_FB_W`/`SWEET_FB_H`; `SWEET_FB_SCALE` controls the ADT scale. The ADT and the boot args must agree.
 

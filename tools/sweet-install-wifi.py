@@ -116,7 +116,7 @@ def verify_build(binaries):
     if metadata.get("donor_commit") != DONOR_COMMIT:
         raise RuntimeError("Wi-Fi binaries were not built from the pinned ios-flame donor commit")
     expected_patches = {
-        path.relative_to(REPOSITORY).as_posix(): digest(path.read_bytes())
+        path.relative_to(REPOSITORY).as_posix(): digest(path.read_bytes().replace(b"\r\n", b"\n"))
         for path in sorted(PATCH_DIRECTORY.glob("*.patch"))
     }
     if metadata.get("patches") != expected_patches:

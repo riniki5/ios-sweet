@@ -17,7 +17,7 @@
 - Strict GPU behavior: 267 MHz default, nonzero GX measurement required, DCVS errors or zero post-transition clock refuse NativeAdreno handoff, exact render-profile readback required, zero-register ring fallback removed.
 - Wi-Fi userspace patches `0001`-`0007` replay cleanly on the pinned donor. The workflow preflights all required sources and no longer lists nonexistent `servreg.c`.
 - Wi-Fi fails closed: userspace polls `kern.sweet_smmu_wlan`, refuses modem boot without kernel-verified SMMU readiness, drops the station link on power-off, and accepts binary or ASCII-hex PMKs.
-- The installer validates the pinned donor, patch set, binary hashes and `SHA256SUMS` before phone access. Launchd retries only pre-PAS failures and never automatically reboots the modem in the same boot.
+- The installer validates the pinned donor, line-ending-normalized patch hashes, binary hashes and `SHA256SUMS` before phone access. Boot-stamp write failures refuse startup; launchd retries only pre-PAS failures and never automatically reboots the modem in the same boot.
 - Validated installer payload outside git: 71 files, 92,123,237 bytes; 65 firmware/BDF files, 4 RMTFS images, and 2 binary slots. Donor binaries in that validation payload are reference-only and must not be installed.
 
 ## Hardware evidence
