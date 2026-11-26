@@ -50,7 +50,7 @@ index a808e6e..a220f85 100644
  
  static uint32_t srv_node, srv_port;
  static int srv_up, started;
-@@ -312,8 +312,13 @@ int wlfw_start(void)
+@@ -312,8 +312,17 @@ int wlfw_start(void)
  		for (int t = 0; t < 5000 && !msa_ready; t++)
  			link_poll(1);
  		/* which request shape this firmware takes is not known yet: try them in turn */
@@ -61,6 +61,10 @@ index a808e6e..a220f85 100644
 +			snprintf(bdf_path, sizeof(bdf_path), BDF_DIR "bdwlan.b%02x", wlfw.board_id);
 +		else
 +			snprintf(bdf_path, sizeof(bdf_path), BDF_DIR "bdwlan.%03x", wlfw.board_id & 0xfff);
++		if (access(bdf_path, R_OK) != 0) {
++			printf("wlfw: no readable %s; using the generic board data\n", bdf_path);
++			snprintf(bdf_path, sizeof(bdf_path), BDF_DIR "bdwlan.bin");
++		}
 +		const struct { const char *path; int file_id, type; unsigned seg; } v[] = {
 +			{ bdf_path, 0, -1, 6144 },
  		};

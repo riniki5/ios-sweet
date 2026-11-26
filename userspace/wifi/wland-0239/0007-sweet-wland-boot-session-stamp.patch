@@ -22,12 +22,25 @@ index 957d58c..e867ee3 100644
  	FILE *f = fopen(WLAND_STAMP, "r");
  	if (f) {
  		if (!fgets(stamp, sizeof(stamp), f))
-@@ -772,7 +781,7 @@ static int auto_up(void)
+@@ -765,6 +774,6 @@ static int auto_up(void)
+ 	if (!strcmp(stamp, now)) {
+-		fprintf(stderr, "wland: already started in this boot\n");
+-		return 1;
++		fprintf(stderr, "wland: already started in this boot; not rebooting the modem\n");
++		return getenv("SWEET_WLAND_LAUNCHD") ? 0 : 1;
+ 	}
+ 	if ((f = fopen(WLAND_STAMP, "w"))) {
+ 		fputs(now, f);
+@@ -772,7 +781,10 @@ static int auto_up(void)
  	if (freopen(WLAND_LOG, "a", stdout))
  		dup2(fileno(stdout), 2);
  	setvbuf(stdout, NULL, _IONBF, 0);
 -	printf("wland auto: boot %ld, memory limit 2048 MB -> %d\n", (long)bt.tv_sec, mrc);
 +	printf("wland auto: boot %ld session %s, memory limit 2048 MB -> %d\n", (long)bt.tv_sec, uuid, mrc);
- 	return up(0);
+-	return up(0);
++	int rc = up(0);
++	if (rc == 2)
++		unlink(WLAND_STAMP);		/* launchd may retry failures from before modem PAS */
++	return rc;
  }
  

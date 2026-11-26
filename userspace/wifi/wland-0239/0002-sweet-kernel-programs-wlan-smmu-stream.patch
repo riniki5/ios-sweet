@@ -1,30 +1,60 @@
 diff --git a/phone/wifi/radio.c b/phone/wifi/radio.c
-index e4add44..bd17773 100644
+index e4add44..2b4bca9 100644
 --- a/phone/wifi/radio.c
 +++ b/phone/wifi/radio.c
-@@ -17,6 +17,7 @@
+@@ -17,6 +17,8 @@
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
 +#include <sys/sysctl.h>
++#include <unistd.h>
  #include <CommonCrypto/CommonHMAC.h>
  #include <CommonCrypto/CommonKeyDerivation.h>
  #include <CommonCrypto/CommonSymmetricKeywrap.h>
-@@ -85,6 +86,17 @@ static int sid_match(uint32_t smr, uint32_t sid, uint32_t mask)
+@@ -85,6 +87,26 @@ static int sid_match(uint32_t smr, uint32_t sid, uint32_t mask)
  
  int smmu_wlan_identity(void)
  {
-+	/* Sweet: on this phone a load from the apps SMMU stalls the CPU once the system is up, although the same registers read fine
-+	 * from the kernel during bsd init. With boot-arg sweetsmmuwlan=1 the kernel (xnu patch 0153) programs this same stream there;
-+	 * never touch the SMMU from here then. */
++	/* Sweet: userspace apps-SMMU loads can stall once the system is up. The kernel programs and verifies
++	 * this stream during bsd init; require its published status instead of trusting the boot argument. */
 +	char args[1024] = "";
 +	size_t len = sizeof(args) - 1;
 +	if (!sysctlbyname("kern.bootargs", args, &len, NULL, 0) && strstr(args, "sweetsmmuwlan=1")) {
-+		printf("smmu: WLAN %#x/%#x stream programmed by the kernel at boot (sweetsmmuwlan=1); not touching the apps SMMU\n",
-+		       WLAN_SID, WLAN_SID_MASK);
-+		smmu_done = 1;
-+		return 0;
++		for (int attempt = 0; attempt < 100; attempt++) {
++			int ready = 0;
++			size_t ready_len = sizeof(ready);
++			if (!sysctlbyname("kern.sweet_smmu_wlan", &ready, &ready_len, NULL, 0) && ready_len == sizeof(ready) && ready == 1) {
++				printf("smmu: WLAN %#x/%#x stream verified by the kernel; not touching the apps SMMU\n",
++				       WLAN_SID, WLAN_SID_MASK);
++				smmu_done = 1;
++				return 0;
++			}
++			if (attempt != 99)
++				usleep(100000);
++		}
++		printf("smmu: kernel did not verify the WLAN %#x/%#x stream\n", WLAN_SID, WLAN_SID_MASK);
++		return EIO;
 +	}
  	uint64_t s = SMMU_PA;
  	uint32_t id0 = rd32(s + 0x20), id1 = rd32(s + 0x24);
  	uint32_t nsmr = id0 & 0xff, ncb = id1 & 0xff;
+diff --git a/phone/wifi/wland.c b/phone/wifi/wland.c
+index 5b0d886..18b1dd5 100644
+--- a/phone/wifi/wland.c
++++ b/phone/wifi/wland.c
+@@ -720,8 +720,12 @@ static int net(unsigned secs)
+ /* everything `up` does, from a fresh boot */
+ static int up(unsigned secs)
+ {
+-	if (smmu_wlan_identity())
+-		printf("up: no WLAN SMMU stream: the radio will not start\n");
++	if (smmu_wlan_identity()) {
++		printf("up: WLAN SMMU verification failed: refusing to boot the modem\n");
++		return 2;
++	}
+-	if (wlan_power() || smp2p_create() || boot_modem())
++	if (wlan_power() || smp2p_create())
++		return 2;
++	if (boot_modem())
+ 		return 1;
+ 	return net(secs) ? 1 : 0;

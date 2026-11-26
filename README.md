@@ -65,7 +65,7 @@ python3 tools/unpack_bootv2.py backup/boot.img dtb/boot_unpacked   # -> dtb/boot
 
 ### 1. Build the kernel
 
-The kernel builds on GitHub's macOS runners with [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build). The workflow fetches xnu-8796, applies `xnu/patches/` in order, and also stages the pinned open-source libpthread, HFS and BearSSL sources it needs. Fork the repo (public repos get free macOS minutes) and run:
+The kernel builds on GitHub's macOS runners with [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build). The workflow fetches xnu-8796, applies `xnu/patches/` in order, and also stages the pinned open-source libpthread, HFS and BearSSL sources it needs. Every repository-owned patch is required: CI fails if one is skipped, while incompatible upstream-only patches may still be skipped. Fork the repo (public repos get free macOS minutes) and run:
 
 ```sh
 gh workflow run xnu.yml -R YOU/ios-sweet
@@ -135,8 +135,9 @@ Wi-Fi uses the pinned iOS 16 `wland`/`netsvc` build from the
 binaries, launchd job, and locally obtained modem/WLAN firmware before building
 with `SWEET_WIFI=1`; `SWEET_FILE_SERVER=1` can be used only while installing
 them. This enables root-only `/dev/pmem` and the kernel-programmed WLAN SMMU
-stream. Protected-network credential persistence is not implemented; use open
-or otherwise non-sensitive test networks during bring-up.
+stream. `wland` refuses to boot the modem unless the kernel publishes verified
+SMMU readiness. Protected-network credential persistence is not implemented;
+use open or otherwise non-sensitive test networks during bring-up.
 
 Boot once with `SWEET_FILE_SERVER=1`, then install the workflow artifact and
 locally obtained toco firmware without reflashing `userdata`:
@@ -154,8 +155,11 @@ python3 tools/sweet-install-wifi.py restore --backup work/wifi-backup
 The firmware directory must contain the toco `modem.*`, `modemr.jsn`,
 `wlanmdsp.mbn`, `modemuw.jsn`, and matching `bdwlan.*` files. The RMTFS directory
 must contain `modemst1.img`, `modemst2.img`, `fsg.img`, and `fsc.img`. The
-installer backs up every replaced file and the launchd plist, verifies each
-readback hash, and installs `org.ios-sweet.wland` to run `wland auto` at boot.
+installer verifies the pinned donor commit, patch hashes, binary hashes and
+`SHA256SUMS` before contacting the phone. It backs up every replaced file and
+the launchd plist, verifies each readback hash, and installs
+`org.ios-sweet.wland` to run `wland auto` at boot. Launchd retries only failures
+from before modem PAS; it never automatically boots the modem twice in one boot.
 
 The CPU renderer is the frame-time limit on this panel, so `tools/toco-shim.sh` reports a smaller logical display by default: 828×1792 (iPhone XR class, 414×896 points at 2×). It passes the same dimensions to the ADT and the `sweetfb_w`/`sweetfb_h` boot args, and AppleCLCD stretches the frames to 1080×2340. Override both dimensions together with `SWEET_FB_W`/`SWEET_FB_H`; `SWEET_FB_SCALE` controls the ADT scale. The ADT and the boot args must agree.
 

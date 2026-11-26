@@ -20,6 +20,9 @@ DIRECTORIES = (
 )
 FIRMWARE_PATTERNS = ("modem.*", "modemr.jsn", "wlanmdsp.mbn", "modemuw.jsn", "bdwlan.*")
 RMTFS_FILES = ("modemst1.img", "modemst2.img", "fsg.img", "fsc.img")
+DONOR_COMMIT = "f09fdb58a2c074d131072947b247240532b7d97d"
+REPOSITORY = Path(__file__).resolve().parents[1]
+PATCH_DIRECTORY = REPOSITORY / "userspace/wifi/wland-0239"
 
 
 class Phone:
@@ -101,7 +104,48 @@ def backup_path(root, remote):
     return path
 
 
+def verify_build(binaries):
+    metadata_path = binaries / "wifi-build.json"
+    sums_path = binaries / "SHA256SUMS"
+    if not metadata_path.is_file() or not sums_path.is_file():
+        raise RuntimeError(f"missing Wi-Fi build metadata in {binaries}")
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"invalid Wi-Fi build metadata: {error}") from error
+    if metadata.get("donor_commit") != DONOR_COMMIT:
+        raise RuntimeError("Wi-Fi binaries were not built from the pinned ios-flame donor commit")
+    expected_patches = {
+        path.relative_to(REPOSITORY).as_posix(): digest(path.read_bytes())
+        for path in sorted(PATCH_DIRECTORY.glob("*.patch"))
+    }
+    if metadata.get("patches") != expected_patches:
+        raise RuntimeError("Wi-Fi build patch hashes do not match this repository")
+    expected_files = {"wland", "netsvc"}
+    if set(metadata.get("files", {})) != expected_files:
+        raise RuntimeError("Wi-Fi build metadata must describe exactly wland and netsvc")
+    sums = {}
+    for line in sums_path.read_text().splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            raise RuntimeError(f"invalid SHA256SUMS line: {line}")
+        checksum, name = fields[0], fields[1].lstrip("*")
+        if name not in expected_files or name in sums:
+            raise RuntimeError(f"unexpected or duplicate SHA256SUMS entry: {name}")
+        sums[name] = checksum
+    if set(sums) != expected_files:
+        raise RuntimeError("SHA256SUMS must contain exactly wland and netsvc")
+    for name in sorted(expected_files):
+        path = binaries / name
+        if not path.is_file():
+            raise RuntimeError(f"missing userspace binary: {path}")
+        actual = digest(path.read_bytes())
+        if actual != metadata["files"][name] or actual != sums[name]:
+            raise RuntimeError(f"Wi-Fi binary hash mismatch: {name}")
+
+
 def sources(args):
+    verify_build(args.binaries)
     result = []
     for name in ("wland", "netsvc"):
         path = args.binaries / name
@@ -138,9 +182,12 @@ def launchd_data(current):
         "Label": LABEL,
         "ProgramArguments": ["/var/local/bin/wland", "auto"],
         "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 30,
         "UserName": "root",
         "EnvironmentVariables": {
-            "PATH": "/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            "PATH": "/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "SWEET_WLAND_LAUNCHD": "1"
         },
     }
     return plistlib.dumps(plist, fmt=plistlib.FMT_BINARY)

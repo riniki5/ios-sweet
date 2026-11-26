@@ -17,7 +17,7 @@ new file mode 100644
 index 0000000..7e40bda
 --- /dev/null
 +++ b/bsd/dev/flame_sta.c
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,243 @@
 +/*
 + * flame: the station side of sys/redwood_sta.h (ios-topaz 0900's topaz_sta.c) over the WCN3990 radio,
 + * which runs in userland (phone/wifi wland) and reaches the kernel through bsd/dev/flame_wlan.c (its
@@ -69,9 +69,10 @@ index 0000000..7e40bda
 +};
 +
 +static int
-+sta_power(__unused bool on)
++sta_power(bool on)
 +{
-+	return 0;                               /* the radio stays up with the modem */
++	/* The modem hosts the radio, so power-off means disconnecting the station and dropping en0's link. */
++	return on ? 0 : flame_wlan_leave();
 +}
 +
 +static int
@@ -713,7 +714,7 @@ new file mode 100644
 index 0000000..e2674ee
 --- /dev/null
 +++ b/bsd/dev/redwood_apple80211.c
-@@ -0,0 +1,739 @@
+@@ -0,0 +1,764 @@
 +/*
 + * Darwin-on-redwood: Apple80211, answered in the kernel.
 + *
@@ -881,6 +882,18 @@ index 0000000..e2674ee
 +
 +#define CIPHER_PMK              6
 +#define CIPHER_PASSPHRASE       10
++
++static int
++hex_value(uint8_t c)
++{
++	if (c >= '0' && c <= '9')
++		return c - '0';
++	if (c >= 'a' && c <= 'f')
++		return c - 'a' + 10;
++	if (c >= 'A' && c <= 'F')
++		return c - 'A' + 10;
++	return -1;
++}
 +
 +/* the link event's data (at least 32 bytes, or the framework drops the event) */
 +struct apple80211_link_changed {
@@ -1260,9 +1273,22 @@ index 0000000..e2674ee
 +		what->security = REDWOOD_STA_WPA2_PSK;
 +		what->passphrase_length = (uint8_t)asked->key_length;
 +		memcpy(what->passphrase, asked->key, asked->key_length);
-+	} else if (asked->key_cipher == CIPHER_PMK && asked->key_length == sizeof(what->pmk)) {
++	} else if (asked->key_cipher == CIPHER_PMK &&
++	    (asked->key_length == sizeof(what->pmk) || asked->key_length == 2 * sizeof(what->pmk))) {
 +		what->security = REDWOOD_STA_WPA2_PSK;
-+		memcpy(what->pmk, asked->key, sizeof(what->pmk));
++		if (asked->key_length == sizeof(what->pmk)) {
++			memcpy(what->pmk, asked->key, sizeof(what->pmk));
++		} else {
++			for (unsigned i = 0; i < sizeof(what->pmk); i++) {
++				const int hi = hex_value(asked->key[2 * i]);
++				const int lo = hex_value(asked->key[2 * i + 1]);
++				if (hi < 0 || lo < 0) {
++					error = EINVAL;
++					goto out;
++				}
++				what->pmk[i] = (uint8_t)((hi << 4) | lo);
++			}
++		}
 +	} else {
 +		error = EINVAL;
 +		goto out;

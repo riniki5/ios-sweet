@@ -1,12 +1,24 @@
 diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
 --- a/bsd/dev/sweet_rpmh.c
 +++ b/bsd/dev/sweet_rpmh.c
-@@ -9646,6 +9646,95 @@ sweet_smmu_dump_mdss(volatile uint32_t *gr0, uint32_t id0, uint32_t id1)
+@@ -6,6 +6,7 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <sys/sysctl.h>
+ #include <sys/errno.h>
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
+@@ -9646,6 +9647,104 @@ sweet_smmu_dump_mdss(volatile uint32_t *gr0, uint32_t id0, uint32_t id1)
  	printf("SWEET SMMU: MDSS %#x/%#x: %u matching SMRs\n", SMMU_MDSS_SID, SMMU_MDSS_MASK, found);
  }
  
 +#define SMMU_WLAN_SID   0x240u
 +#define SMMU_WLAN_MASK  0x1u
++static int sweet_smmu_wlan_ready;
++SYSCTL_INT(_kern, OID_AUTO, sweet_smmu_wlan, CTLFLAG_RD, &sweet_smmu_wlan_ready, 0,
++    "Kernel verified the WLAN SMMU stream");
++
 +static bool
 +smmu_sid_match(uint32_t smr, uint32_t sid, uint32_t mask)
 +{
@@ -14,7 +26,7 @@ diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
 +	return ((id ^ sid) & ~(m | mask) & 0x7fff) == 0;
 +}
 +
-+static void
++static int
 +sweet_smmu_wlan_stream(volatile uint32_t *gr0, uint32_t id0, uint32_t id1)
 +{
 +	const uint32_t nsmr = id0 & 0xff, ncb = id1 & 0xff;
@@ -23,11 +35,12 @@ diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
 +	if (psize != 0x1000 || nsmr > 128 || ncb > 128 || (npage + ncb) * psize > 0x100000) {
 +		printf("SWEET SMMU: WLAN stream: unexpected geometry smr=%u cb=%u page=%#llx x %llu\n",
 +		    nsmr, ncb, psize, npage);
-+		return;
++		return EIO;
 +	}
 +	volatile uint32_t *gr1 = (volatile uint32_t *)ml_io_map(0x15000000 + psize, psize);
 +	if (!gr1) {
-+		return;
++		printf("SWEET SMMU: WLAN stream: context-bank map failed\n");
++		return ENOMEM;
 +	}
 +	uint64_t used[2] = {0, 0};
 +	int slot = -1;
@@ -44,13 +57,15 @@ diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
 +			const uint32_t routed_cb = s2cr & 0xff;
 +			if (routed_cb >= ncb) {
 +				printf("SWEET SMMU: WLAN stream: SMR%u routes invalid CB%u\n", i, routed_cb);
-+				return;
++				return EIO;
 +			}
 +			used[routed_cb / 64] |= 1ull << (routed_cb % 64);
 +		}
 +		if (smmu_sid_match(smr, SMMU_WLAN_SID, SMMU_WLAN_MASK)) {
-+			printf("SWEET SMMU: WLAN stream: SMR%u %#x already matches (S2CR %#x)\n", i, smr, s2cr);
-+			return;
++			const bool ok = ((s2cr >> 16) & 3) == 0 && (s2cr & 0xff) < ncb;
++			printf("SWEET SMMU: WLAN stream: SMR%u %#x already matches (S2CR %#x) -> %s\n",
++			    i, smr, s2cr, ok ? "ok" : "invalid route");
++			return ok ? 0 : EIO;
 +		}
 +	}
 +	int cb = -1;
@@ -68,7 +83,7 @@ diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
 +	}
 +	if (slot < 0 || cb < 0) {
 +		printf("SWEET SMMU: WLAN stream: no free SMR/bank (SMR %d, bank %d)\n", slot, cb);
-+		return;
++		return ENOENT;
 +	}
 +	cbp[0x58 / 4] = 0xffffffff;
 +	cbp[0x20 / 4] = 0;
@@ -89,22 +104,26 @@ diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
 +	const uint32_t smr = gr0[(0x800 + 4 * slot) / 4];
 +	const uint32_t s2cr = gr0[(0xc00 + 4 * slot) / 4];
 +	const bool ok = (smr >> 31) && smmu_sid_match(smr, SMMU_WLAN_SID, SMMU_WLAN_MASK) &&
-+	    ((s2cr >> 16) & 3) == 0 && (s2cr & 0xff) == (uint32_t)cb;
++	    ((s2cr >> 16) & 3) == 0 && (s2cr & 0xff) == (uint32_t)cb &&
++	    (cbp[0] & 0xe0) == 0xe0 && gr1[cb] == 0x0001f000;
 +	printf("SWEET SMMU: WLAN %#x/%#x -> CB%d via SMR%d: SMR %#x S2CR %#x SCTLR %#x CBAR %#x -> %s\n",
 +	    SMMU_WLAN_SID, SMMU_WLAN_MASK, cb, slot, smr, s2cr, cbp[0], gr1[cb], ok ? "ok" : "NOT as written");
++	return ok ? 0 : EIO;
 +}
 +
  static void
  sweet_smmu_probe_thread(void *arg, wait_result_t wr)
  {
-@@ -9665,6 +9756,11 @@ sweet_smmu_probe_thread(void *arg, wait_result_t wr)
+@@ -9665,6 +9766,13 @@ sweet_smmu_probe_thread(void *arg, wait_result_t wr)
  	const uint32_t id0 = smmu[0x20 / 4], id1 = smmu[0x24 / 4], id2 = smmu[0x28 / 4];
  	printf("SWEET SMMU: ID0=%#x ID1=%#x ID2=%#x: %u SMRs, %u context banks\n", id0, id1, id2, id0 & 0xff, id1 & 0xff);
  	sweet_smmu_dump_mdss(smmu, id0, id1);
 +	int wlan = 0;
 +	PE_parse_boot_argn("sweetsmmuwlan", &wlan, sizeof(wlan));
 +	if (wlan) {
-+		sweet_smmu_wlan_stream(smmu, id0, id1);
++		const int error = sweet_smmu_wlan_stream(smmu, id0, id1);
++		sweet_smmu_wlan_ready = error == 0;
++		printf("SWEET SMMU: WLAN readiness=%d errno=%d\n", sweet_smmu_wlan_ready, error);
 +	}
  }
  

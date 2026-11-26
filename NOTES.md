@@ -15,7 +15,9 @@
 - Compiled 23 Adreno sources and 9 Wi-Fi sources into real Mach-O arm64 objects: zero failures.
 - Internal symbol closure: 112 references, 112 resolved, zero missing across the 32-object set.
 - Strict GPU behavior: 267 MHz default, nonzero GX measurement required, DCVS errors or zero post-transition clock refuse NativeAdreno handoff, exact render-profile readback required, zero-register ring fallback removed.
-- Wi-Fi userspace patches `0001`-`0007` match the pinned donor result hashes. The workflow preflights all required sources and no longer lists nonexistent `servreg.c`.
+- Wi-Fi userspace patches `0001`-`0007` replay cleanly on the pinned donor. The workflow preflights all required sources and no longer lists nonexistent `servreg.c`.
+- Wi-Fi fails closed: userspace polls `kern.sweet_smmu_wlan`, refuses modem boot without kernel-verified SMMU readiness, drops the station link on power-off, and accepts binary or ASCII-hex PMKs.
+- The installer validates the pinned donor, patch set, binary hashes and `SHA256SUMS` before phone access. Launchd retries only pre-PAS failures and never automatically reboots the modem in the same boot.
 - Validated installer payload outside git: 71 files, 92,123,237 bytes; 65 firmware/BDF files, 4 RMTFS images, and 2 binary slots. Donor binaries in that validation payload are reference-only and must not be installed.
 
 ## Hardware evidence
@@ -27,8 +29,8 @@
 
 ## Active blockers
 
-- Full current-HEAD XNU build and kernel link have not run yet.
-- The exact patched `wland`/`netsvc` artifact has not been built by `sweet-wifi-0239` yet.
+- The pre-hardening HEAD built successfully in XNU run `45725794229` and Wi-Fi run `45725988021`; the current SMMU/installer hardening awaits fresh CI artifacts.
+- XNU CI now treats every repository-owned patch as required. The redundant `0150` delay patch was removed because `0148` already supplies the same 60-second delay.
 - No Wi-Fi binaries, launchd job, firmware, or RMTFS images have been installed on the phone.
 - Shader/GMEM execution and the NativeAdreno/Metal userspace ABI remain unqualified on hardware.
 - Protected Wi-Fi credential persistence is not implemented; bring-up must use open or non-sensitive networks.
@@ -45,10 +47,9 @@
 
 ## Next build and boot
 
-```sh
-gh workflow run xnu.yml -R riniki5/ios-sweet --ref codex/springboard-gpu-access
-gh workflow run wifi-0239.yml -R riniki5/ios-sweet --ref codex/springboard-gpu-access
-```
+Both workflows trigger on pushes to `main` and `codex/springboard-gpu-access`.
+After the workflows are present on the default branch they can also be dispatched
+with `gh workflow run xnu.yml` and `gh workflow run wifi-0239.yml`.
 
 After both workflows pass, download and verify their artifacts, then package the exact kernel:
 

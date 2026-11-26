@@ -17,7 +17,7 @@ done
 GPU_STAGE=${SWEET_GPU_STAGE:-9}
 case "$GPU_STAGE" in 1|2|3|4|5|6|7|8|9) ;; *) echo "error: SWEET_GPU_STAGE must be 1 through 9" >&2; exit 1 ;; esac
 GPU_KHZ=${SWEET_GPU_KHZ:-267000}
-case "$GPU_KHZ" in 180000|267000|355000|430000|565000|650000|800000) ;; *) echo "error: SWEET_GPU_KHZ must be a supported A618 OPP" >&2; exit 1 ;; esac
+case "$GPU_KHZ" in 267000|355000|430000|565000|650000|800000) ;; *) echo "error: SWEET_GPU_KHZ must be a supported A618 OPP" >&2; exit 1 ;; esac
 NATIVE_METAL=${SWEET_NATIVE_METAL:-0}
 case "$NATIVE_METAL" in 0) RENDER_ARGS="sweetnative=0" ;; 1) RENDER_ARGS="sweetnative=1 sweetmtl=2 sweetgles=0" ;; *) echo "error: SWEET_NATIVE_METAL must be 0 or 1" >&2; exit 1 ;; esac
 FILE_SERVER=${SWEET_FILE_SERVER:-0}
