@@ -8,6 +8,9 @@ on:
       runner:
         description: runner label (macos-15 arm64 queues for hours under capacity limits)
         default: macos-15-intel
+  push:
+    branches: [codex/springboard-gpu-access]
+    paths: [.github/workflows/wifi-0239.yml, userspace/wifi/**]
 env:
   DONOR_REPO: https://github.com/Yofuness/ios-flame.git
   DONOR_COMMIT: f09fdb58a2c074d131072947b247240532b7d97d
