@@ -30,8 +30,8 @@ As of **2026-11-26** the phone boots to iOS, and the touchscreen and hardware bu
 
 ## What does not work (yet)
 
-- **Wi-Fi is integrated but not yet hardware-qualified.** The WCN3990 kernel transport and pinned iOS 16 `wland`/`netsvc` stack are in the tree; the exact userspace artifact, installation, and a scan/join test remain. Bluetooth, cellular, audio, camera, sensors, GPS and SEP / Face ID are still unavailable.
-- **GPU UI rendering is not yet qualified.** The kernel reaches CP fence completion, but NativeAdreno is published only after strict clock and render-profile checks; a successful on-screen Metal draw and responsive UI have not yet been confirmed. Keep the GPU opt-in and preserve the working touch path while validating the matching userspace bundle.
+- **Wi-Fi is integrated but not yet hardware-qualified.** The WCN3990 kernel transport, pinned iOS 16 `wland`/`netsvc` artifact, and verified installer are ready; on-phone installation and a scan/join test remain. Bluetooth, cellular, audio, camera, sensors, GPS and SEP / Face ID are still unavailable.
+- **GPU UI rendering is not yet qualified.** The strict CI kernel was accepted for a temporary boot, and NativeAdreno is published only after strict clock and render-profile checks; a successful on-screen Metal draw and responsive UI have not yet been confirmed. Keep the GPU opt-in and preserve the working touch path while validating the matching userspace bundle.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty. Several apps show a black window (Phone, Photos, Messages) because they need hardware we do not have.
 - **Slow boot:** about 90 seconds on the Apple logo, against a few seconds on a real iPhone.
 - **Security is off:** permissive code signing (AMFI) and sandbox policies, a stub AppleKeyStore, no data protection. Do not put anything personal on it.

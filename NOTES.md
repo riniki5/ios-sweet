@@ -21,6 +21,8 @@
 - The native Metal installer durably saves rollback files and verifies readback hashes. Restore preflights the complete manifest, rejects missing/tampered backups, and refuses files modified after installation before changing the phone; synthetic install-failure, restore, backup-tamper and modified-file tests pass.
 - Final Wi-Fi CI run `45729871060` passed. Its installer-accepted arm64 artifact has `wland` SHA-256 `818a1c161e9a1e3c1a8485a45d650ce9e2e54548e7bc1d7d9858377eb4d3499c` and `netsvc` SHA-256 `005e61f876f9874ef433c9c0be040458c747c17896f6a3a0f8e9e44c8e39c6d9`.
 - Validated the final installer payload outside git: 71 files, 92,142,485 bytes; 65 firmware/BDF files, 4 RMTFS images, and 2 binary slots. The binaries are the exact CI artifact, not donor reference builds.
+- Strict XNU CI run `45729558880` passed for `cfd0901c4741e095f1cd675eb1fb0bcf31a74c28`; every repository-owned patch applied. The downloaded arm64 kernel matches `SHA256SUMS`: `9423592272066b05a49852310c8adcdb6278e00dafd0d2a9963f01601cf8b4d3`.
+- Packaged that exact kernel at 267 MHz with Native Metal/Wi-Fi disabled and the file server enabled. `shim/out/shim-boot.img` is 17,580,032 bytes, SHA-256 `0fe20fd97405e0b39877d77afc3f9c61a30074c52e6ddf99e99bce980929d413`; its payload command line and embedded CI kernel provenance were verified, and ABL accepted the temporary boot.
 
 ## Hardware evidence
 
@@ -31,7 +33,7 @@
 
 ## Active blockers
 
-- The pre-hardening HEAD built successfully in XNU run `45725794229` and Wi-Fi run `45725988021`; the current SMMU/installer hardening awaits fresh CI artifacts.
+- Strict XNU and final Wi-Fi artifacts are verified. Native Metal run `45731157262` is building the matching bundle; the first strict kernel boot was accepted by ABL and runtime live logs are still pending.
 - XNU CI now treats every repository-owned patch as required. The redundant `0150` delay patch was removed because `0148` already supplies the same 60-second delay.
 - No Wi-Fi binaries, launchd job, firmware, or RMTFS images have been installed on the phone.
 - Shader/GMEM execution and the NativeAdreno/Metal userspace ABI remain unqualified on hardware.
