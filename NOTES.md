@@ -23,6 +23,7 @@
 - Validated the final installer payload outside git: 71 files, 92,142,485 bytes; 65 firmware/BDF files, 4 RMTFS images, and 2 binary slots. The binaries are the exact CI artifact, not donor reference builds.
 - Strict XNU CI run `45729558880` passed for `cfd0901c4741e095f1cd675eb1fb0bcf31a74c28`; every repository-owned patch applied. The downloaded arm64 kernel matches `SHA256SUMS`: `9423592272066b05a49852310c8adcdb6278e00dafd0d2a9963f01601cf8b4d3`.
 - Packaged that exact kernel at 267 MHz with Native Metal/Wi-Fi disabled and the file server enabled. `shim/out/shim-boot.img` is 17,580,032 bytes, SHA-256 `0fe20fd97405e0b39877d77afc3f9c61a30074c52e6ddf99e99bce980929d413`; its payload command line and embedded CI kernel provenance were verified, and ABL accepted the temporary boot.
+- Native Metal CI run `45731157262` passed for `e94577274d0911f10eb14c67691c8e54e759ae42`. The arm64 bundle and legacy compatibility bundle match their file manifests; `SweetNativeMetal` SHA-256 is `83cbe88dec87bb05e18d879300c544f5408db4b1d3f2c0d7e06c1dc372aeb9b7`, the backend is `c895854c1889533dc757faebc795753e93b6f78673001d265eca47e1669112fa`, and ABI SHA-256 `0f5a0900764945bcd3cbb353ace283b658e12d2c28e022866ca35d09fb0cd26a` matches the kernel-generated header after line-ending normalization. No Vulkan, Turnip, or metal2vulkan dependency is present.
 
 ## Hardware evidence
 
@@ -33,7 +34,7 @@
 
 ## Active blockers
 
-- Strict XNU and final Wi-Fi artifacts are verified. Native Metal run `45731157262` is building the matching bundle; the first strict kernel boot was accepted by ABL and runtime live logs are still pending.
+- Strict XNU, final Wi-Fi, and native Metal artifacts are verified. The first strict kernel boot was accepted by ABL but produced no USB enumeration, file-service response, or UDP telemetry during the 180-second observation; the phone is not in fastboot, so the persistent log must be pulled through recovery before another boot attempt.
 - XNU CI now treats every repository-owned patch as required. The redundant `0150` delay patch was removed because `0148` already supplies the same 60-second delay.
 - No Wi-Fi binaries, launchd job, firmware, or RMTFS images have been installed on the phone.
 - Shader/GMEM execution and the NativeAdreno/Metal userspace ABI remain unqualified on hardware.
