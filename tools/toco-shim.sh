@@ -15,9 +15,17 @@ for f in a618_gmu.bin a630_sqe.fw a615_zap.mdt a615_zap.b02; do
 	[ -f "$FW_DIR/$f" ] || { echo "error: missing local GPU firmware $FW_DIR/$f" >&2; exit 1; }
 done
 GPU_STAGE=${SWEET_GPU_STAGE:-9}
-case "$GPU_STAGE" in 1|2|3|4|5|6|7|8|9) ;; *) echo "error: SWEET_GPU_STAGE must be 1 through 9" >&2; exit 1 ;; esac
+case "$GPU_STAGE" in 0|1|2|3|4|5|6|7|8|9) ;; *) echo "error: SWEET_GPU_STAGE must be 0 through 9" >&2; exit 1 ;; esac
 GPU_KHZ=${SWEET_GPU_KHZ:-267000}
 case "$GPU_KHZ" in 267000|355000|430000|565000|650000|800000) ;; *) echo "error: SWEET_GPU_KHZ must be a supported A618 OPP" >&2; exit 1 ;; esac
+DDR_VOTE=${SWEET_DDR_VOTE:-1}
+case "$DDR_VOTE" in 0|1) ;; *) echo "error: SWEET_DDR_VOTE must be 0 or 1" >&2; exit 1 ;; esac
+BO_POOL_MIB=${SWEET_BO_POOL_MIB:-384}
+case "$BO_POOL_MIB" in *[!0-9]*|'') echo "error: SWEET_BO_POOL_MIB must be an integer from 0 to 1024" >&2; exit 1 ;; esac
+if [ "${#BO_POOL_MIB}" -gt 4 ] || [ "$BO_POOL_MIB" -gt 1024 ]; then
+    echo "error: SWEET_BO_POOL_MIB must be an integer from 0 to 1024" >&2
+    exit 1
+fi
 NATIVE_METAL=${SWEET_NATIVE_METAL:-0}
 case "$NATIVE_METAL" in 0) RENDER_ARGS="sweetnative=0" ;; 1) RENDER_ARGS="sweetnative=1 sweetmtl=2 sweetgles=0" ;; *) echo "error: SWEET_NATIVE_METAL must be 0 or 1" >&2; exit 1 ;; esac
 FILE_SERVER=${SWEET_FILE_SERVER:-0}
@@ -47,6 +55,6 @@ python3 tools/sweet-adreno-firmware.py "$TMP/base.adt" "$FW_DIR/a618_gmu.bin" "$
     --zap-code "$FW_DIR/a615_zap.b02" \
     --zap-code-sha256 61be42f041eb6051eb9f56beb1f98ed97ab21faf2ef2df6b9151ba1a46aae878
 python3 tools/mkpayload.py "$K" "$TMP/gpu.adt" shim/out/payload.bin \
-    --cmdline "debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=60 sweetfb_w=$FB_W sweetfb_h=$FB_H sweetusb=2 sweetgpu=$GPU_STAGE sweetgpukhz=$GPU_KHZ $RENDER_ARGS sweetfiles=$FILE_SERVER $WIFI_ARGS"
+    --cmdline "debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=60 sweetfb_w=$FB_W sweetfb_h=$FB_H sweetusb=2 sweetgpu=$GPU_STAGE sweetgpukhz=$GPU_KHZ $RENDER_ARGS sweetddr=$DDR_VOTE sweetbopool=$BO_POOL_MIB sweetfiles=$FILE_SERVER $WIFI_ARGS"
 SWEET_DEVICE=toco shim/build.sh ../shim/out/payload.bin
-echo "shim/out/shim-boot.img ready (toco ADT + Adreno firmware, ${FB_W}x${FB_H}@${FB_SCALE}, sweetgpu=$GPU_STAGE, sweetgpukhz=$GPU_KHZ, sweetnative=$NATIVE_METAL, sweetfiles=$FILE_SERVER, sweetwifi=$WIFI): fastboot boot shim/out/shim-boot.img"
+echo "shim/out/shim-boot.img ready (toco ADT + Adreno firmware, ${FB_W}x${FB_H}@${FB_SCALE}, sweetgpu=$GPU_STAGE, sweetgpukhz=$GPU_KHZ, sweetnative=$NATIVE_METAL, sweetddr=$DDR_VOTE, sweetbopool=$BO_POOL_MIB, sweetfiles=$FILE_SERVER, sweetwifi=$WIFI): fastboot boot shim/out/shim-boot.img"
