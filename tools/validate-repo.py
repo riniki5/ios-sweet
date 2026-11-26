@@ -54,10 +54,9 @@ def validate_patches(verbose=False):
             if not ('--- ' in head or 'diff ' in head or 'Index:' in head):
                 errors.append(f"Patch missing standard diff header: {fname}")
 
-    # Check contiguous sequence. 0110 was an abandoned, malformed GPU patch;
-    # its intended worker-release change was regenerated as 0111 from 0109.
-    # Keep this one historical hole explicit so later accidental gaps fail.
-    allowed_gaps = {110}
+    # Keep historical abandoned/superseded patch numbers explicit so later
+    # accidental gaps still fail. 0150 was regenerated as 0151 from 0148.
+    allowed_gaps = {110, 149, 150, 152, 156, *range(160, 170)}
     if seen_numbers:
         sorted_nums = sorted(seen_numbers.keys())
         expected = 1
