@@ -70,7 +70,10 @@ def main(argv):
     if len(argv) != 1:
         raise SystemExit(__doc__)
     out = Path(argv[0])
-    raw = fetch(HOST, PORT, out)
+    try:
+        raw = fetch(HOST, PORT, out)
+    except (OSError, RuntimeError) as error:
+        raise SystemExit(str(error)) from None
     decoder = Path(__file__).with_name('sweet-log.py')
     try:
         subprocess.run([sys.executable, str(decoder), str(raw), str(out)], check=True)
