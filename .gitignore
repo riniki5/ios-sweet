@@ -2,6 +2,7 @@
 backup/
 dtb/
 recovery/
+logs/
 # third-party/Apple sources fetched for reading
 research/
 shim/out/
