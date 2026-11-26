@@ -98,6 +98,10 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def valid_digest(value):
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
 def backup_path(root, remote):
     path = root / remote.lstrip("/")
     path.resolve().relative_to(root.resolve())
@@ -238,9 +242,21 @@ def install(args, phone):
         for remote in reversed(changed):
             entry = next(item for item in manifest["files"] if item["remote"] == remote)
             try:
+                current = phone.get(remote)
+                current_hash = digest(current) if current is not None else None
+                if current_hash is None and entry["backup"] is None:
+                    continue
+                if current_hash is not None and current_hash != entry["installed"] and current_hash != entry["backup"]:
+                    print(f"ROLLBACK SKIPPED modified file: {remote}")
+                    continue
+                if current_hash == entry["backup"]:
+                    continue
                 saved = backup_path(args.backup, remote)
                 if saved.is_file():
-                    phone.put(remote, saved.read_bytes(), entry["mode"])
+                    data = saved.read_bytes()
+                    if digest(data) != entry["backup"]:
+                        raise RuntimeError("backup hash mismatch")
+                    phone.put(remote, data, entry["mode"])
                 else:
                     phone.command(f"RM {remote}", allow_error=True)
             except Exception as error:
@@ -258,22 +274,103 @@ def restore(args, phone):
     manifest_path = args.backup / "manifest.json"
     if not manifest_path.is_file():
         raise RuntimeError(f"backup manifest is missing: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text())
-    for entry in reversed(manifest["files"]):
-        remote = entry["remote"]
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"invalid backup manifest: {error}") from error
+    if not isinstance(manifest, dict) or manifest.get("host") != args.host or manifest.get("port") != args.port:
+        raise RuntimeError("backup manifest does not match this phone host and port")
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError("backup manifest does not contain a file list")
+
+    required = {LAUNCHD, "/var/local/bin/wland", "/var/local/bin/netsvc"}
+    required.update(f"/var/local/fw/rmtfs/{name}" for name in RMTFS_FILES)
+    required.update(f"/var/local/fw/modem/{name}" for name in ("modem.mdt", "modemr.jsn", "wlanmdsp.mbn", "modemuw.jsn"))
+    seen = set()
+    previous = {}
+    current = {}
+    expected_backups = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError("backup manifest contains an invalid file entry")
+        remote = entry.get("remote")
+        if not isinstance(remote, str) or not remote.startswith("/") or any(part in ("", ".", "..") for part in remote.split("/")[1:]):
+            raise RuntimeError(f"invalid remote path in backup manifest: {remote!r}")
+        if remote != LAUNCHD and not remote.startswith(("/var/local/bin/", "/var/local/fw/modem/", "/var/local/fw/rmtfs/")):
+            raise RuntimeError(f"unexpected remote path in backup manifest: {remote}")
+        if remote in {"/var/local/bin/wland", "/var/local/bin/netsvc"}:
+            pass
+        elif remote.startswith("/var/local/bin/"):
+            raise RuntimeError(f"unexpected binary path in backup manifest: {remote}")
+        elif remote.startswith("/var/local/fw/modem/"):
+            if "/" in remote.removeprefix("/var/local/fw/modem/"):
+                raise RuntimeError(f"unexpected nested firmware path in backup manifest: {remote}")
+        elif remote.startswith("/var/local/fw/rmtfs/"):
+            if remote not in {f"/var/local/fw/rmtfs/{name}" for name in RMTFS_FILES}:
+                raise RuntimeError(f"unexpected RMTFS path in backup manifest: {remote}")
+        elif remote != LAUNCHD:
+            raise RuntimeError(f"unexpected remote path in backup manifest: {remote}")
+        if remote in seen or entry.get("relative") != remote.lstrip("/"):
+            raise RuntimeError(f"duplicate or inconsistent backup entry: {remote}")
+        seen.add(remote)
+        mode = entry.get("mode")
+        if not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 0o7777:
+            raise RuntimeError(f"invalid mode in backup manifest: {remote}")
+        installed_hash = entry.get("installed")
+        backup_hash = entry.get("backup")
+        if not valid_digest(installed_hash) or (backup_hash is not None and not valid_digest(backup_hash)):
+            raise RuntimeError(f"invalid hash in backup manifest: {remote}")
         saved = backup_path(args.backup, remote)
-        if saved.is_file():
-            data = saved.read_bytes()
-            phone.put(remote, data, entry["mode"])
-            actual = phone.get(remote)
-            if actual is None or digest(actual) != digest(data):
-                raise RuntimeError(f"restore readback hash mismatch: {remote}")
-            print(f"restored: {remote}")
+        if backup_hash is None:
+            if saved.exists():
+                raise RuntimeError(f"unexpected backup file for newly added {remote}")
+            previous[remote] = None
         else:
-            current = phone.get(remote)
-            if current is not None:
+            if not saved.is_file():
+                raise RuntimeError(f"backup file is missing: {saved}")
+            data = saved.read_bytes()
+            if digest(data) != backup_hash:
+                raise RuntimeError(f"backup hash mismatch: {saved}")
+            previous[remote] = data
+            expected_backups.add(remote.lstrip("/"))
+
+    missing = required - seen
+    if missing or not any(remote.startswith("/var/local/fw/modem/modem.b") for remote in seen) or not any(remote.startswith("/var/local/fw/modem/bdwlan.") for remote in seen):
+        raise RuntimeError(f"backup manifest is incomplete: {', '.join(sorted(missing)) or 'modem.bNN/bdwlan.*'}")
+    actual_backups = {
+        path.relative_to(args.backup).as_posix()
+        for path in args.backup.rglob("*")
+        if path.is_file() and path != manifest_path
+    }
+    if actual_backups != expected_backups:
+        raise RuntimeError("backup directory contains missing or unexpected files")
+
+    for entry in entries:
+        remote = entry["remote"]
+        data = phone.get(remote)
+        current[remote] = data
+        if data is not None:
+            current_hash = digest(data)
+            if current_hash != entry["installed"] and current_hash != entry["backup"]:
+                raise RuntimeError(f"refusing to overwrite modified file: {remote}")
+
+    for entry in reversed(entries):
+        remote = entry["remote"]
+        old = previous[remote]
+        if old is None:
+            if current[remote] is not None:
                 phone.command(f"RM {remote}")
                 print(f"removed newly added: {remote}")
+            continue
+        if current[remote] == old:
+            print(f"same: {remote}")
+            continue
+        phone.put(remote, old, entry["mode"])
+        actual = phone.get(remote)
+        if actual is None or digest(actual) != digest(old):
+            raise RuntimeError(f"restore readback hash mismatch: {remote}")
+        print(f"restored: {remote}")
     phone.command("SYNC")
 
 
