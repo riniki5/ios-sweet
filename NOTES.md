@@ -18,7 +18,9 @@
 - Wi-Fi userspace patches `0001`-`0007` replay cleanly on the pinned donor. The workflow preflights all required sources and no longer lists nonexistent `servreg.c`.
 - Wi-Fi fails closed: userspace polls `kern.sweet_smmu_wlan`, refuses modem boot without kernel-verified SMMU readiness, drops the station link on power-off, and accepts binary or ASCII-hex PMKs.
 - The installer validates the pinned donor, line-ending-normalized patch hashes, binary hashes and `SHA256SUMS` before phone access. Boot-stamp write failures refuse startup; launchd retries only pre-PAS failures and never automatically reboots the modem in the same boot.
-- Validated installer payload outside git: 71 files, 92,123,237 bytes; 65 firmware/BDF files, 4 RMTFS images, and 2 binary slots. Donor binaries in that validation payload are reference-only and must not be installed.
+- The native Metal installer durably saves rollback files and verifies readback hashes. Restore preflights the complete manifest, rejects missing/tampered backups, and refuses files modified after installation before changing the phone; synthetic install-failure, restore, backup-tamper and modified-file tests pass.
+- Final Wi-Fi CI run `45729871060` passed. Its installer-accepted arm64 artifact has `wland` SHA-256 `818a1c161e9a1e3c1a8485a45d650ce9e2e54548e7bc1d7d9858377eb4d3499c` and `netsvc` SHA-256 `005e61f876f9874ef433c9c0be040458c747c17896f6a3a0f8e9e44c8e39c6d9`.
+- Validated the final installer payload outside git: 71 files, 92,142,485 bytes; 65 firmware/BDF files, 4 RMTFS images, and 2 binary slots. The binaries are the exact CI artifact, not donor reference builds.
 
 ## Hardware evidence
 

@@ -89,6 +89,17 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def valid_digest(value):
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def write_durable(path, data):
+    with path.open("wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -107,21 +118,51 @@ def main():
         if not manifest_path.is_file():
             parser.error(f"backup manifest is missing: {manifest_path}")
         manifest = json.loads(manifest_path.read_text())
-        for rel, mode in reversed(FILES):
-            path = f"{manifest['remote']}/{rel}"
-            backup = args.backup / rel
-            if backup.is_file():
-                old = backup.read_bytes()
-                phone.put(path, old, mode)
-                actual = phone.get(path)
-                if actual is None or digest(actual) != digest(old):
-                    raise RuntimeError(f"restore readback hash mismatch: {rel}")
-                print(f"restored: {rel}")
+        expected_files = {rel for rel, _ in FILES}
+        if manifest.get("remote") != REMOTE:
+            parser.error(f"backup remote does not match {REMOTE}")
+        if set(manifest.get("installed", {})) != expected_files or set(manifest.get("backup", {})) != expected_files:
+            parser.error("backup manifest does not describe the complete bundle")
+        previous = {}
+        current = {}
+        for rel, _ in FILES:
+            installed_hash = manifest["installed"][rel]
+            backup_hash = manifest["backup"][rel]
+            if not valid_digest(installed_hash) or (backup_hash is not None and not valid_digest(backup_hash)):
+                parser.error(f"backup manifest has an invalid hash for {rel}")
+            path = f"{REMOTE}/{rel}"
+            if backup_hash is None:
+                previous[rel] = None
+                if (args.backup / rel).exists():
+                    parser.error(f"unexpected backup file for newly added {rel}")
             else:
-                current = phone.get(path)
-                if current is not None:
+                backup = args.backup / rel
+                if not backup.is_file():
+                    parser.error(f"backup file is missing: {backup}")
+                previous[rel] = backup.read_bytes()
+                if digest(previous[rel]) != backup_hash:
+                    parser.error(f"backup hash mismatch: {backup}")
+            current[rel] = phone.get(path)
+            if current[rel] is not None:
+                current_hash = digest(current[rel])
+                if current_hash != installed_hash and current_hash != backup_hash:
+                    raise RuntimeError(f"refusing to overwrite modified file: {rel}")
+        for rel, mode in reversed(FILES):
+            path = f"{REMOTE}/{rel}"
+            old = previous[rel]
+            if old is None:
+                if current[rel] is not None:
                     phone.command(f"RM {path}")
                     print(f"removed newly added: {rel}")
+                continue
+            if current[rel] == old:
+                print(f"same: {rel}")
+                continue
+            phone.put(path, old, mode)
+            actual = phone.get(path)
+            if actual is None or digest(actual) != digest(old):
+                raise RuntimeError(f"restore readback hash mismatch: {rel}")
+            print(f"restored: {rel}")
         phone.command("SYNC")
         return
     if (args.backup / "manifest.json").exists():
@@ -147,14 +188,14 @@ def main():
                 saved.parent.mkdir(parents=True, exist_ok=True)
                 if saved.exists() and saved.read_bytes() != old:
                     raise RuntimeError(f"refusing to overwrite different backup {saved}")
-                saved.write_bytes(old)
+                write_durable(saved, old)
         manifest = {
             "remote": REMOTE,
             "host": args.host,
             "installed": {rel: digest(data) for rel, _, data in sources},
             "backup": {rel: digest(data) if data is not None else None for rel, data in previous.items()},
         }
-        (args.backup / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        write_durable(args.backup / "manifest.json", (json.dumps(manifest, indent=2) + "\n").encode())
         phone.command(f"MKDIR {REMOTE} 755")
         phone.command(f"MKDIR {REMOTE}/_CodeSignature 755")
         phone.command(f"MKDIR {REMOTE}/Licenses 755")

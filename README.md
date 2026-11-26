@@ -126,8 +126,10 @@ python3 tools/sweet-install-native-metal.py install \
 python3 tools/sweet-install-native-metal.py restore work/native-metal-backup
 ```
 
-The installer saves existing files and verifies each readback hash. Keep the
-backup directory so the bundle can be restored from a later boot with
+The installer durably saves existing files and verifies each readback hash.
+Restore preflights every backup and refuses missing or tampered backups, or
+files modified after installation, before changing the phone. Keep the backup
+directory so the bundle can be restored from a later boot with
 `SWEET_FILE_SERVER=1`.
 
 Wi-Fi uses the pinned iOS 16 `wland`/`netsvc` build from the

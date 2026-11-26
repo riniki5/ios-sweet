@@ -2,7 +2,14 @@ name: sweet-native-metal
 on:
   workflow_dispatch:
   push:
-    branches: [codex/native-adreno-metal]
+    branches: [main, codex/springboard-gpu-access]
+    paths:
+      - ".github/workflows/native-metal.yml"
+      - "tools/build-sweet-native-metal.py"
+      - "tools/prepare-sweet-native-metal.py"
+      - "tools/build-sweet-metal2.py"
+      - "userspace/native-metal/**"
+      - "xnu/patches/**"
 jobs:
   build:
     runs-on: macos-15-intel
