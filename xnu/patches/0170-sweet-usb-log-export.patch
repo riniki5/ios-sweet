@@ -1,0 +1,108 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -686,7 +686,8 @@
+  *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
+  *   | u64 flush sequence
+  * ring offset of byte n = n % ring size. Read it from a recovery with
+- * tools/sweet-log-pull.sh. Disabled with boot-arg sweetlog=0.
++ * tools/sweet-log-pull.sh or over USB with GETLOG. Disabled with boot-arg
++ * sweetlog=0; keep that disabled on a diagnostic boot to preserve this log.
+  */
+ #define SWEET_LOG_SIZE          (4u << 20)
+ #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
+@@ -817,6 +818,52 @@
+ 	}
+ }
+ 
++/* Snapshot before socket I/O so the logger cannot tear a transferred ring. */
++int
++sweet_log_export(char **out, size_t *size)
++{
++	const size_t bytes = SWEET_LOG_BLOCKS * UFS_BLOCK;
++	uint64_t base;
++	char *data;
++	int error = 0;
++
++	if (!su.ready || su.nblocks < SWEET_LOG_BLOCKS) {
++		return ENXIO;
++	}
++	data = kalloc_data(bytes, Z_WAITOK);
++	if (!data) {
++		return ENOMEM;
++	}
++	base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
++	lck_mtx_lock(&sweet_ufs_lock);
++	for (uint32_t done = 0; done < SWEET_LOG_BLOCKS && !error;) {
++		uint32_t count = MIN((uint32_t)(SWEET_LOG_BLOCKS - done),
++		    (uint32_t)(BOUNCE_SIZE / UFS_BLOCK));
++		error = ufs_read_blocks(base + done, count);
++		if (!error) {
++			memcpy(data + (size_t)done * UFS_BLOCK, (void *)(su.dma + DMA_BOUNCE),
++			    count * UFS_BLOCK);
++		}
++		done += count;
++	}
++	if (!error) {
++		struct sweet_log_header h;
++		memcpy(&h, data, sizeof(h));
++		if (memcmp(h.magic, "SWEETLOG", sizeof(h.magic)) || h.version != 1 ||
++		    h.size != SWEET_LOG_SIZE) {
++			error = ENODATA;
++		}
++	}
++	lck_mtx_unlock(&sweet_ufs_lock);
++	if (error) {
++		kfree_data(data, bytes);
++		return error;
++	}
++	*out = data;
++	*size = bytes;
++	return 0;
++}
++
+ /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
+ int sweet_ufs_rootdev(dev_t *dev);
+ 
+--- a/bsd/dev/sweet_files.c
++++ b/bsd/dev/sweet_files.c
+@@ -6,6 +6,7 @@
+  *
+  *   PUT <path> <mode-octal> <size>\n<size bytes>  -> "OK <size>\n"  (root:wheel)
+  *   GET <path>\n                                  -> "OK <size>\n<bytes>"
++ *   GETLOG\n                                       -> "OK <size>\n<bytes>" (last SWEETLOG)
+  *   MKDIR <path> <mode-octal>\n                   -> "OK\n"
+  *   LINK <target> <path>\n                        -> "OK\n"  (symlink)
+  *   RM <path>\n                                   -> "OK\n"
+@@ -42,6 +43,7 @@
+ extern int sweet_vfs_mkdir(const char *path, int mode);
+ extern int sweet_vfs_symlink(const char *target, const char *link);
+ extern int sweet_vfs_unlink(const char *path);
++extern int sweet_log_export(char **out, size_t *size);
+ extern kern_return_t thread_terminate(thread_t);
+ struct sync_args;
+ extern int sync(proc_t p, struct sync_args *uap, int32_t *retval);
+@@ -260,6 +262,24 @@
+ 		printf("SWEET FILES: GET %s -> %d\n", line + 4, err);
+ 		return;
+ 	}
++	if (!strcmp(line, "GETLOG")) {
++		char *data = NULL;
++		size_t size = 0;
++		err = sweet_log_export(&data, &size);
++		if (!err) {
++			sf_reply(so, 0, (uint64_t)size, true);
++			for (size_t off = 0; off < size && !err;) {
++				size_t chunk = MIN((size_t)SF_BUF, size - off);
++				err = sf_send(so, data + off, chunk);
++				off += chunk;
++			}
++			kfree_data(data, size);
++		} else {
++			sf_reply(so, err, 0, false);
++		}
++		printf("SWEET FILES: GETLOG %zu -> %d\n", size, err);
++		return;
++	}
+ 	if (!strcmp(line, "SYNC")) {
+ 		/* flush written files before a forced reboot (0168) */
+ 		int32_t rv = 0;

@@ -26,6 +26,7 @@
 - Preserved the original same-kernel stage-1 read-only GPU fallback outside git as `work-toco/shim-boot-stage1-45729558880.img`, SHA-256 `eddd15aabe4d8852e001d6b5e009cc2209d20ecc749bab613854402293ce439c`.
 - Packaged two quieter diagnostics from the same CI kernel and verified their embedded command lines. The current `shim/out/shim-boot.img` is stage 1 with `sweetddr=0 sweetbopool=0`, SHA-256 `2cf618944a5c97ce2b15ea3973a47e01db010715be7e426644141f4ee47b2960`; `work-toco/shim-boot-stage1-minimal-45729558880.img` is identical. The stage-0 minimal image at `work-toco/shim-boot-stage0-minimal-45729558880.img`, SHA-256 `ea19eab9357c8229fc9bbff490ea9b8cca9ff185302fbd542ad6fa90df7d7275`, additionally disables the GPU audit. All keep 267 MHz, Native Metal/Wi-Fi off and the file server on. Boot stage 1 first; use stage 0 only if stage 1 still produces no telemetry.
 - Native Metal CI run `45731157262` passed for `e94577274d0911f10eb14c67691c8e54e759ae42`. The arm64 bundle and legacy compatibility bundle match their file manifests; `SweetNativeMetal` SHA-256 is `83cbe88dec87bb05e18d879300c544f5408db4b1d3f2c0d7e06c1dc372aeb9b7`, the backend is `c895854c1889533dc757faebc795753e93b6f78673001d265eca47e1669112fa`, and ABI SHA-256 `0f5a0900764945bcd3cbb353ace283b658e12d2c28e022866ca35d09fb0cd26a` matches the kernel-generated header after line-ending normalization. No Vulkan, Turnip, or metal2vulkan dependency is present.
+- Patch `0170` adds a read-only `GETLOG` command. It snapshots the complete persistent area under the UFS lock before socket I/O and validates the `SWEETLOG` header. The full patch series replays cleanly, and synthetic wrapped-log, phone-error, truncated-transfer and invalid-size tests pass. Full kernel CI and on-device retrieval remain pending.
 
 ## Hardware evidence
 
@@ -36,7 +37,7 @@
 
 ## Active blockers
 
-- Strict XNU, final Wi-Fi, and native Metal artifacts are verified. The first strict kernel boot was accepted by ABL but produced no USB enumeration, file-service response, or UDP telemetry during the 180-second observation; the phone is not in fastboot, so the persistent log must be pulled through recovery before another boot attempt.
+- Strict XNU, final Wi-Fi, and native Metal artifacts are verified. The first strict kernel boot was accepted by ABL but produced no USB enumeration, file-service response, or UDP telemetry during the 180-second observation; the phone is not in fastboot. After patch `0170` passes CI, a minimal `sweetfiles=1 sweetlog=0` boot can retrieve that boot's persistent log without recovery; until then, recovery is still required.
 - XNU CI now treats every repository-owned patch as required. The redundant `0150` delay patch was removed because `0148` already supplies the same 60-second delay.
 - No Wi-Fi binaries, launchd job, firmware, or RMTFS images have been installed on the phone.
 - Shader/GMEM execution and the NativeAdreno/Metal userspace ABI remain unqualified on hardware.
@@ -61,11 +62,15 @@ with `gh workflow run xnu.yml` and `gh workflow run wifi-0239.yml`.
 After both workflows pass, download and verify their artifacts, then package the exact kernel:
 
 ```sh
-SWEET_GPU_KHZ=267000 SWEET_WIFI=0 SWEET_FILE_SERVER=1 \
+SWEET_GPU_STAGE=1 SWEET_GPU_KHZ=267000 SWEET_DDR_VOTE=0 SWEET_BO_POOL_MIB=0 \
+  SWEET_WIFI=0 SWEET_FILE_SERVER=1 SWEET_LOG_PERSIST=0 \
   tools/toco-shim.sh xnu/out/kernel.development.sweet
 fastboot boot shim/out/shim-boot.img
+python3 tools/sweet-log-usb.py logs/toco.txt
 ```
 
+This diagnostic boot preserves the preceding on-disk log for `GETLOG`. Use stage 9
+with the default `SWEET_LOG_PERSIST=1` only when resuming GPU rendering work.
 Do not boot older scratch shims: they still contain the 800 MHz default, permissive ring adoption, or both.
 
 ## Scratch artifacts outside git

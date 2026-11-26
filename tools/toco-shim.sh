@@ -30,6 +30,8 @@ NATIVE_METAL=${SWEET_NATIVE_METAL:-0}
 case "$NATIVE_METAL" in 0) RENDER_ARGS="sweetnative=0" ;; 1) RENDER_ARGS="sweetnative=1 sweetmtl=2 sweetgles=0" ;; *) echo "error: SWEET_NATIVE_METAL must be 0 or 1" >&2; exit 1 ;; esac
 FILE_SERVER=${SWEET_FILE_SERVER:-0}
 case "$FILE_SERVER" in 0|1) ;; *) echo "error: SWEET_FILE_SERVER must be 0 or 1" >&2; exit 1 ;; esac
+LOG_PERSIST=${SWEET_LOG_PERSIST:-1}
+case "$LOG_PERSIST" in 0|1) ;; *) echo "error: SWEET_LOG_PERSIST must be 0 or 1" >&2; exit 1 ;; esac
 WIFI=${SWEET_WIFI:-0}
 case "$WIFI" in 0) WIFI_ARGS="sweetwifid=0" ;; 1) WIFI_ARGS="sweetwifid=1 sweetpmem=1 sweetsmmuprobe=1 sweetsmmuwlan=1 sweetcell=0" ;; *) echo "error: SWEET_WIFI must be 0 or 1" >&2; exit 1 ;; esac
 FB_W=${SWEET_FB_W:-828}
@@ -55,6 +57,6 @@ python3 tools/sweet-adreno-firmware.py "$TMP/base.adt" "$FW_DIR/a618_gmu.bin" "$
     --zap-code "$FW_DIR/a615_zap.b02" \
     --zap-code-sha256 61be42f041eb6051eb9f56beb1f98ed97ab21faf2ef2df6b9151ba1a46aae878
 python3 tools/mkpayload.py "$K" "$TMP/gpu.adt" shim/out/payload.bin \
-    --cmdline "debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=60 sweetfb_w=$FB_W sweetfb_h=$FB_H sweetusb=2 sweetgpu=$GPU_STAGE sweetgpukhz=$GPU_KHZ $RENDER_ARGS sweetddr=$DDR_VOTE sweetbopool=$BO_POOL_MIB sweetfiles=$FILE_SERVER $WIFI_ARGS"
+    --cmdline "debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=60 sweetfb_w=$FB_W sweetfb_h=$FB_H sweetusb=2 sweetgpu=$GPU_STAGE sweetgpukhz=$GPU_KHZ $RENDER_ARGS sweetddr=$DDR_VOTE sweetbopool=$BO_POOL_MIB sweetfiles=$FILE_SERVER sweetlog=$LOG_PERSIST $WIFI_ARGS"
 SWEET_DEVICE=toco shim/build.sh ../shim/out/payload.bin
-echo "shim/out/shim-boot.img ready (toco ADT + Adreno firmware, ${FB_W}x${FB_H}@${FB_SCALE}, sweetgpu=$GPU_STAGE, sweetgpukhz=$GPU_KHZ, sweetnative=$NATIVE_METAL, sweetddr=$DDR_VOTE, sweetbopool=$BO_POOL_MIB, sweetfiles=$FILE_SERVER, sweetwifi=$WIFI): fastboot boot shim/out/shim-boot.img"
+echo "shim/out/shim-boot.img ready (toco ADT + Adreno firmware, ${FB_W}x${FB_H}@${FB_SCALE}, sweetgpu=$GPU_STAGE, sweetgpukhz=$GPU_KHZ, sweetnative=$NATIVE_METAL, sweetddr=$DDR_VOTE, sweetbopool=$BO_POOL_MIB, sweetfiles=$FILE_SERVER, sweetlog=$LOG_PERSIST, sweetwifi=$WIFI): fastboot boot shim/out/shim-boot.img"

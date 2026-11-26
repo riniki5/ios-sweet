@@ -47,7 +47,7 @@ ABL (stock Xiaomi bootloader, unlocked)
               -> dyld + shared cache -> launchd -> daemons -> backboardd + SpringBoard
 ```
 
-There is no serial port. The kernel draws its console into the framebuffer that ABL leaves at `0x9c000000`, and keeps a persistent 4 MiB log ring at the end of `userdata`. You read that log from TWRP with `tools/sweet-log-pull.sh`, so you don't have to film the screen.
+There is no serial port. The kernel draws its console into the framebuffer that ABL leaves at `0x9c000000`, and keeps a persistent 4 MiB log ring at the end of `userdata`. Read it from TWRP with `tools/sweet-log-pull.sh`, or from a file-server boot with `tools/sweet-log-usb.py`. Boot the reader with `SWEET_LOG_PERSIST=0` (`sweetlog=0`) so the current boot cannot overwrite the previous boot's log before you fetch it.
 
 ## How to do it yourself
 
@@ -114,7 +114,10 @@ supported A618 OPP only for testing, and NativeAdreno publication still requires
 a nonzero measured GX clock plus exact render-profile readback. To opt into the
 new `SweetNativeMetal.bundle` and the USB-only live file service, build with
 `SWEET_NATIVE_METAL=1 SWEET_FILE_SERVER=1`; this selects `sweetnative=1`
-and `sweetmtl=2` and enables `sweetfiles=1` for that boot.
+and `sweetmtl=2` and enables `sweetfiles=1` for that boot. `SWEET_LOG_PERSIST=0`
+disables only the on-disk logger for that boot; use it on a diagnostic/file-server
+boot when you need `GETLOG` to return the preceding boot's log. Live console
+output remains available.
 Download the `sweet-native-metal-ios16` workflow artifact, then install its
 bundle while that USB file service is running and before GPU discovery
 restarts `backboardd`:
@@ -182,6 +185,7 @@ What the less obvious boot-args do:
 | `sweetgpukhz=267000` | GPU OPP ceiling; the toco default is the proven 267 MHz corner. Higher values are opt-in and must pass clock/profile qualification |
 | `sweetnative=1 sweetmtl=2 sweetgles=0` | Select the direct AIR/freedreno `SweetNativeMetal` frontend. Install the matching iOS 16 bundle before selecting it |
 | `sweetfiles=1` | Opt-in root file access over the USB Ethernet gadget at `192.168.7.2:2223`; keep it disabled except while installing or restoring a bundle |
+| `sweetlog=0` | Keep the current boot from overwriting the persistent log; use with `sweetfiles=1` and `GETLOG` to recover the preceding boot's log |
 | `sweetpmem=1 sweetsmmuprobe=1 sweetsmmuwlan=1` | Enable the root-only physical-memory device, apps-SMMU probe, and kernel-programmed WCN3990 stream for `wland`; selected by `SWEET_WIFI=1` |
 | `sweettouch=0`, `sweetkeys=0` | Disable the touch or button driver |
 | `sweettouchdelay=N` | Start the touch thread N seconds after boot (default 45) |
@@ -197,6 +201,19 @@ fastboot boot shim/out/shim-boot.img
 The first boot takes about 90 seconds on the Apple logo, then the lock screen appears. Swipe up to unlock. To get back to fastboot, hold Power + Volume down.
 
 ### 5. Read the kernel log
+
+From a minimal file-server boot, fetch the preceding boot's log without recovery:
+
+```sh
+SWEET_GPU_STAGE=1 SWEET_DDR_VOTE=0 SWEET_BO_POOL_MIB=0 \
+  SWEET_FILE_SERVER=1 SWEET_LOG_PERSIST=0 \
+  tools/toco-shim.sh xnu/out/kernel.development.sweet
+fastboot boot shim/out/shim-boot.img      # temporary; nothing is flashed
+python3 tools/sweet-log-usb.py logs/toco.txt
+```
+
+The fetch saves `logs/toco.txt.bin` before decoding it. If the phone cannot
+reach the file service, use recovery instead:
 
 ```sh
 fastboot boot recovery/recovery.img      # TWRP, temporary
@@ -234,6 +251,7 @@ A healthy touch log contains `SWEET TOUCH: panel 1080x2340 ... vddio=0x...`, `SW
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
 | `tools/sweet-log-pull.sh`, `sweet-log.py` | Read the persistent kernel log from recovery |
+| `tools/sweet-log-usb.py` | Fetch and decode the persistent kernel log through `GETLOG` |
 | `tools/sweet-crash.py` | Symbolicate console crash reports |
 | `tools/xnu-cc.py` | Local single-file compile check from a CI log |
 | `tools/qemu-sweet.py` | QEMU test boots with framebuffer text decoding |
