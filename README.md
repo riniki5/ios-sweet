@@ -21,7 +21,7 @@ See the [active `toco` README](https://github.com/riniki5/ios-sweet/blob/codex/s
 
 **Apple's iOS 16 running on a Redmi Note 10 Pro.**
 
-This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
+This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). It runs the iPhone X's iOS 16.7.16 (20H392) userland with project-specific bring-up modifications: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
 
 As of **2026-11-09**, the phone boots to the **iOS home screen with Metal GPU acceleration, working touch and hardware buttons, Wi-Fi with an instant network list, the SIM (calls), built-in speaker audio for apps, Bluetooth audio, Safari video playback, smooth haptics, and screen sleep/wake**. Motion and light sensors now stream into iOS. Animations still run at about 37 fps and apps open with a short delay.
 
