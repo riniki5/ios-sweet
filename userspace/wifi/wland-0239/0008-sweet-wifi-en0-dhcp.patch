@@ -59,7 +59,7 @@ new file mode 100755
 index 0000000..273b17e
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,895 @@
+@@ -0,0 +1,904 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
@@ -812,12 +812,19 @@ index 0000000..273b17e
 +
 +static void dhcp_session(const char *ifname, const uint8_t mac[6])
 +{
++    int waiting_said = 0;
 +    while (!stopping && getppid() == parent_pid) {
 +        unsigned interface_index = if_nametoindex(ifname);
 +        if (!interface_index) {
++            if (!waiting_said) {
++                log_msg("waiting for %s to appear", ifname);
++                waiting_said = 1;
++            }
 +            usleep(500000);
 +            continue;
 +        }
++        waiting_said = 0;
++        log_msg("%s interface index %u", ifname, interface_index);
 +        control_fd = socket(AF_INET, SOCK_DGRAM, 0);
 +        udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 +        if (control_fd < 0 || udp_fd < 0) {
@@ -830,6 +837,7 @@ index 0000000..273b17e
 +            usleep(1000000);
 +            continue;
 +        }
++        log_msg("DHCP sockets opened (control %d, UDP %d)", control_fd, udp_fd);
 +        if (close_on_exec(control_fd) < 0 || close_on_exec(udp_fd) < 0) {
 +            log_msg("FD_CLOEXEC: %s", strerror(errno));
 +            close(control_fd);
@@ -952,6 +960,7 @@ index 0000000..273b17e
 +    signal(SIGTERM, on_stop);
 +    signal(SIGINT, on_stop);
 +    setvbuf(stdout, NULL, _IONBF, 0);
++    log_msg("helper entered (pid %d, parent %d)", getpid(), parent_pid);
 +    dhcp_session(argv[0], mac);
 +    return 0;
 +}
@@ -990,7 +999,7 @@ index 8ea8d4b..b4df821 100755
  #include "cell.h"
  
  /* cmd-db aux levels (as in the GPU's arc votes) */
-@@ -657,13 +662,95 @@ static void join_poll(void)
+@@ -657,13 +662,113 @@ static void join_poll(void)
  	asked = 1;
  }
  
@@ -1026,21 +1035,39 @@ index 8ea8d4b..b4df821 100755
 +	         radio_mac[0], radio_mac[1], radio_mac[2], radio_mac[3], radio_mac[4], radio_mac[5]);
 +	char *argv[] = { "wland", "l3dhcp", "en0", mac_text, NULL };
 +	posix_spawnattr_t attributes;
++	posix_spawn_file_actions_t actions;
 +	int error = posix_spawnattr_init(&attributes);
 +	if (error) {
 +		printf("l3: spawn attributes: %s\n", strerror(error));
 +		return;
 +	}
++	error = posix_spawn_file_actions_init(&actions);
++	if (error) {
++		posix_spawnattr_destroy(&attributes);
++		printf("l3: spawn file actions: %s\n", strerror(error));
++		return;
++	}
++	for (int fd = 0; fd < 3; fd++) {
++		error = posix_spawn_file_actions_addinherit_np(&actions, fd);
++		if (error) {
++			posix_spawn_file_actions_destroy(&actions);
++			posix_spawnattr_destroy(&attributes);
++			printf("l3: inherit fd %d: %s\n", fd, strerror(error));
++			return;
++		}
++	}
 +#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
 +	error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
 +	if (error) {
++		posix_spawn_file_actions_destroy(&actions);
 +		posix_spawnattr_destroy(&attributes);
 +		printf("l3: spawn flags: %s\n", strerror(error));
 +		return;
 +	}
 +#endif
 +	pid_t pid;
-+	error = posix_spawn(&pid, "/var/local/bin/wland", NULL, &attributes, argv, environ);
++	error = posix_spawn(&pid, "/var/local/bin/wland", &actions, &attributes, argv, environ);
++	posix_spawn_file_actions_destroy(&actions);
 +	posix_spawnattr_destroy(&attributes);
 +	if (error) {
 +		printf("l3: cannot start DHCP client: %s\n", strerror(error));
