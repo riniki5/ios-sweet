@@ -56,16 +56,15 @@ index 8f22298..27e17d2 100755
  		return -1;
 diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
 new file mode 100755
-index 0000000..1bdde95
+index 0000000..ba4f7a0
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,868 @@
+@@ -0,0 +1,850 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
 +#include <mach/mach_time.h>
 +#include <net/if.h>
-+#include <net/if_arp.h>
 +#include <net/if_dl.h>
 +#include <net/if_media.h>
 +#include <netinet/in.h>
@@ -378,23 +377,8 @@ index 0000000..1bdde95
 +    return 0;
 +}
 +
-+static int arp_cached_conflict(int control, uint32_t address, const uint8_t mac[6])
-+{
-+    struct arpreq request;
-+    struct sockaddr_in *ipv4;
-+    memset(&request, 0, sizeof(request));
-+    ipv4 = (struct sockaddr_in *)&request.arp_pa;
-+    ipv4->sin_len = sizeof(*ipv4);
-+    ipv4->sin_family = AF_INET;
-+    ipv4->sin_addr.s_addr = address;
-+    if (ioctl(control, SIOCGARP, &request) < 0 || !(request.arp_flags & ATF_COM))
-+        return 0;
-+    struct sockaddr_dl *link = (struct sockaddr_dl *)&request.arp_ha;
-+    return link->sdl_alen == 6 && memcmp(LLADDR(link), mac, 6) != 0;
-+}
-+
 +/* XNU needs an interface IPv4 address before it can source the first DHCP broadcast. */
-+static int bootstrap_prepare(int control, const char *ifname, const uint8_t mac[6])
++static int bootstrap_prepare(int control, const char *ifname)
 +{
 +    if (primary_address(control, ifname))
 +        return interface_up(control, ifname);
@@ -403,8 +387,6 @@ index 0000000..1bdde95
 +        if ((host & 0xff) == 0 || (host & 0xff) == 0xff)
 +            continue;
 +        uint32_t address = htonl(0xa9fe0000u | host);
-+        if (arp_cached_conflict(control, address, mac))
-+            continue;
 +        if (address_change(control, ifname, address, htonl(0xffff0000),
 +                           address | htonl(0x0000ffff), 1) < 0)
 +            return -1;
@@ -885,7 +867,7 @@ index 0000000..1bdde95
 +            }
 +            if (dstate == D_IDLE) {
 +                if (now >= next_start_ms) {
-+                    if (bootstrap_prepare(control_fd, ifname, mac) < 0) {
++                    if (bootstrap_prepare(control_fd, ifname) < 0) {
 +                        next_start_ms = now + 2000;
 +                        continue;
 +                    }
