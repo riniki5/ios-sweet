@@ -56,15 +56,16 @@ index 8f22298..27e17d2 100755
  		return -1;
 diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
 new file mode 100755
-index 0000000..c1eb908
+index 0000000..a6aa684
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,847 @@
+@@ -0,0 +1,879 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
 +#include <mach/mach_time.h>
 +#include <net/if.h>
++#include <net/if_media.h>
 +#include <netinet/in.h>
 +#include <signal.h>
 +#include <spawn.h>
@@ -96,7 +97,7 @@ index 0000000..c1eb908
 +static pid_t parent_pid;
 +static int dstate;
 +static uint32_t xid, offered, server_id, my_ip, my_mask, my_broadcast, my_router;
-+static uint32_t my_dns[2], lease_seconds, bootstrap_ip;
++static uint32_t my_dns[2], lease_seconds, bootstrap_ip, source_broadcast;
 +static uint64_t sent_ms, started_ms, bound_ms, next_start_ms, renew_ms, rebind_ms, expires_ms;
 +static unsigned tries;
 +static char domain[256], my_domain[256];
@@ -185,12 +186,13 @@ index 0000000..c1eb908
 +
 +static int link_ready(int control, const char *ifname)
 +{
-+    struct ifreq request;
-+    memset(&request, 0, sizeof(request));
-+    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
-+    if (ioctl(control, SIOCGIFFLAGS, &request) < 0)
++    struct ifmediareq media;
++    memset(&media, 0, sizeof(media));
++    snprintf(media.ifm_name, sizeof(media.ifm_name), "%s", ifname);
++    if (ioctl(control, SIOCGIFMEDIA, &media) < 0)
 +        return -1;
-+    return (request.ifr_flags & IFF_UP) != 0;
++    return (media.ifm_status & (IFM_AVALID | IFM_ACTIVE)) ==
++           (IFM_AVALID | IFM_ACTIVE);
 +}
 +
 +static uint32_t primary_address(int control, const char *ifname)
@@ -203,6 +205,21 @@ index 0000000..c1eb908
 +        return 0;
 +    address = (struct sockaddr_in *)&request.ifr_addr;
 +    return address->sin_family == AF_INET ? address->sin_addr.s_addr : 0;
++}
++
++static int interface_broadcast(int control, const char *ifname, uint32_t *broadcast)
++{
++    struct ifreq request;
++    struct sockaddr_in *address;
++    memset(&request, 0, sizeof(request));
++    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
++    if (ioctl(control, SIOCGIFBRDADDR, &request) < 0)
++        return -1;
++    address = (struct sockaddr_in *)&request.ifr_broadaddr;
++    if (address->sin_family != AF_INET || !address->sin_addr.s_addr)
++        return -1;
++    *broadcast = address->sin_addr.s_addr;
++    return 0;
 +}
 +
 +static int interface_up(int control, const char *ifname)
@@ -368,15 +385,21 @@ index 0000000..c1eb908
 +/* XNU needs an interface IPv4 address before it can source the first DHCP broadcast. */
 +static int bootstrap_prepare(int control, const char *ifname)
 +{
-+    if (primary_address(control, ifname))
-+        return interface_up(control, ifname);
++    source_broadcast = 0;
++    if (primary_address(control, ifname)) {
++        if (interface_up(control, ifname) < 0 ||
++            interface_broadcast(control, ifname, &source_broadcast) < 0)
++            return -1;
++        return 0;
++    }
 +    for (unsigned attempt = 0; attempt < 8; attempt++) {
 +        uint32_t host = 1 + arc4random_uniform(0xfdff);
 +        if ((host & 0xff) == 0 || (host & 0xff) == 0xff)
 +            continue;
 +        uint32_t address = htonl(0xa9fe0000u | host);
++        source_broadcast = address | htonl(0x0000ffff);
 +        if (address_change(control, ifname, address, htonl(0xffff0000),
-+                           address | htonl(0x0000ffff), 1) < 0)
++                           source_broadcast, 1) < 0)
 +            return -1;
 +        bootstrap_ip = address;
 +        char text[INET_ADDRSTRLEN];
@@ -390,11 +413,10 @@ index 0000000..c1eb908
 +
 +static void bootstrap_remove(int control, const char *ifname)
 +{
-+    if (!bootstrap_ip)
-+        return;
-+    if (bootstrap_ip != my_ip)
++    if (bootstrap_ip && bootstrap_ip != my_ip)
 +        address_change(control, ifname, bootstrap_ip, 0, 0, 0);
 +    bootstrap_ip = 0;
++    source_broadcast = 0;
 +}
 +
 +static void restore_lease(int control, const char *ifname, uint32_t address, uint32_t mask,
@@ -708,7 +730,9 @@ index 0000000..c1eb908
 +    destination.sin_len = sizeof(destination);
 +    destination.sin_family = AF_INET;
 +    destination.sin_port = htons(67);
-+    destination.sin_addr.s_addr = dstate == D_RENEWING && server_id ? server_id : htonl(INADDR_BROADCAST);
++    uint32_t broadcast = dstate == D_REBINDING && my_broadcast ? my_broadcast : source_broadcast;
++    destination.sin_addr.s_addr = dstate == D_RENEWING && server_id ? server_id :
++        (broadcast ? broadcast : htonl(INADDR_BROADCAST));
 +    sent_ms = now_ms();
 +    if (sendto(udp, packet, 300, 0, (struct sockaddr *)&destination, sizeof(destination)) < 0) {
 +        log_msg("DHCP send: %s", strerror(errno));
@@ -742,7 +766,8 @@ index 0000000..c1eb908
 +        dhcp_send(udp, ifname, mac, dstate == D_SELECTING ? 1 : 3);
 +        return;
 +    }
-+    if (dstate == D_BOUND && now >= expires_ms) {
++    if ((dstate == D_BOUND || dstate == D_RENEWING || dstate == D_REBINDING) &&
++        now >= expires_ms) {
 +        dhcp_abort(control_fd, ifname, "lease expired");
 +        return;
 +    }
@@ -794,6 +819,13 @@ index 0000000..c1eb908
 +            close(control_fd);
 +            close(udp_fd);
 +            control_fd = udp_fd = -1;
++            continue;
++        }
++        if (interface_up(control_fd, ifname) < 0) {
++            close(control_fd);
++            close(udp_fd);
++            control_fd = udp_fd = -1;
++            usleep(1000000);
 +            continue;
 +        }
 +        int one = 1;

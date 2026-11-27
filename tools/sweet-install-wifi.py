@@ -85,6 +85,11 @@ class Phone:
         finally:
             sock.close()
 
+    def replace(self, path, data, mode):
+        # vnode_open(O_TRUNC) does not shrink files on this root; unlink first.
+        self.command(f"RM {path}", allow_error=True)
+        self.put(path, data, mode)
+
     def command(self, command, allow_error=False):
         try:
             response = self.request((command + "\n").encode())
@@ -238,8 +243,8 @@ def install(args, phone):
         for directory in DIRECTORIES:
             phone.command(f"MKDIR {directory} 755", allow_error=True)
         for remote, mode, data in records:
-            phone.put(remote, data, mode)
             changed.append(remote)
+            phone.replace(remote, data, mode)
             actual = phone.get(remote)
             if actual is None or digest(actual) != digest(data):
                 raise RuntimeError(f"readback hash mismatch: {remote}")
@@ -263,7 +268,10 @@ def install(args, phone):
                     data = saved.read_bytes()
                     if digest(data) != entry["backup"]:
                         raise RuntimeError("backup hash mismatch")
-                    phone.put(remote, data, entry["mode"])
+                    phone.replace(remote, data, entry["mode"])
+                    actual = phone.get(remote)
+                    if actual is None or digest(actual) != entry["backup"]:
+                        raise RuntimeError("rollback readback hash mismatch")
                 else:
                     phone.command(f"RM {remote}", allow_error=True)
             except Exception as error:
@@ -373,7 +381,7 @@ def restore(args, phone):
         if current[remote] == old:
             print(f"same: {remote}")
             continue
-        phone.put(remote, old, entry["mode"])
+        phone.replace(remote, old, entry["mode"])
         actual = phone.get(remote)
         if actual is None or digest(actual) != digest(old):
             raise RuntimeError(f"restore readback hash mismatch: {remote}")

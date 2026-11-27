@@ -8,7 +8,7 @@ The project descends from [dipa-studio/ios-sweet](https://github.com/dipa-studio
 
 Active development is on [`codex/springboard-gpu-access`](https://github.com/riniki5/ios-sweet/tree/codex/springboard-gpu-access). The fork's default `main` branch retains the upstream `sweet` port; its hardware and feature claims are not `toco` results.
 
-As of **2026-11-27**, known-good CPU-rendered configurations have reached the iOS lock/home screen with working touch and hardware buttons. WCN3990 scanning, WPA2 authentication and association work through the kernel `en0` bridge. The Layer-3 DHCP helper has passed arm64 iOS CI, but the new binary is not installed on the phone yet, so IPv4 routing, DNS and Safari web access remain unverified. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup and a CP fence have completed on toco; a successful native-Metal UI draw and stable 60 FPS have not been confirmed, and GPU diagnostic boots may still stall at the Apple logo.
+As of **2026-11-27**, known-good CPU-rendered configurations have reached the iOS lock/home screen with working touch and hardware buttons. WCN3990 scanning, WPA2 authentication and association work through the kernel `en0` bridge. The first supervised `0008` DHCP build is installed and its Wi-Fi-enabled stage-0 shim reaches association, but an `IFF_UP` readiness deadlock prevented DHCP. The helper now raises `en0` explicitly, uses media readiness and sends to the Wi-Fi subnet broadcast; host validation passes, while a fresh CI artifact, installation and on-device IPv4/DNS/Safari validation remain pending. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup and a CP fence have completed on toco; a successful native-Metal UI draw and stable 60 FPS have not been confirmed, and GPU diagnostic boots may still stall at the Apple logo.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into `userdata` and **erases Android's user data**. Never flash `boot`, `dtbo` or `recovery`; test kernels only with `fastboot boot shim-boot.img`.
 
@@ -26,14 +26,14 @@ As of **2026-11-27**, known-good CPU-rendered configurations have reached the iO
 | GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; native-Metal UI rendering still needs qualification |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power and volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
-| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. Link stability and Layer 3 still need validation |
+| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. The initial supervised `0008` DHCP client is installed but deadlocked before DHCP; its readiness fix is host-validated and awaits CI/device validation |
 | Battery | Bring-up IOPMPowerSource service with a static 100% reading and charging icon; not real fuel-gauge telemetry |
 | Device identity | Emulated iPhone X identity (`iPhone10,3` / `D22AP`) for userland compatibility and gesture UI; the physical device remains a Mi Note 10 Lite |
 | Activation | Bring-up activation path in mobileactivationd, selected through device-tree security status; not a genuine Apple activation |
 
 ## What does not work (yet)
 
-- **Wi-Fi associates but has no validated Layer 3 yet.** The installed `0001`–`0007` build scans and joins on `en0`, but does not configure an IPv4 service, default route or resolver, so Safari cannot load pages. Patch `0008` adds a supervised `en0` DHCP client and passed [arm64 iOS CI run 45959320701](https://github.com/riniki5/ios-sweet/actions/runs/45959320701); its artifact is verified but still needs a recovery-file-service reinstall and on-device DHCP/routing/DNS/Safari validation. Bluetooth, cellular, camera, GPS and SEP / Face ID are unavailable on toco; do not carry over the `sweet` branch's audio, haptics, sensor or SIM claims.
+- **Wi-Fi associates but has no validated Layer 3 yet.** The initial `0008` build from [arm64 iOS CI run 45959320701](https://github.com/riniki5/ios-sweet/actions/runs/45959320701) is installed and reads back correctly. Its Wi-Fi-enabled stage-0 boot reached association and `en0`, then stopped at `l3: waiting for en0 link`: the bridge creates `en0` down and only raises `IFF_UP` when an address is assigned, so the old readiness order deadlocked. The fixed helper explicitly raises the interface and waits for `IFM_AVALID | IFM_ACTIVE`; it still needs a fresh CI artifact, exact phone installation and validation of IPv4 leasing, routing, DNS, Settings and Safari HTTP/HTTPS. Bluetooth, cellular, camera, GPS and SEP / Face ID are unavailable on toco; do not carry over the `sweet` branch's audio, haptics, sensor or SIM claims.
 - **GPU UI rendering is not yet qualified.** The strict CI kernel and matching native Metal bundle are built and verified, but the first temporary boot produced no USB telemetry and the phone is no longer in fastboot. A newer stage-0 diagnostic adds `GETLOG` and disables the GPU audit for the safest log-recovery boot; boot it with `SWEET_LOG_PERSIST=0` to retrieve the preceding boot's log. Stage 1 can also disable the unconditional DDR vote and BO-pool reservation. NativeAdreno is published only after strict clock and render-profile checks; a successful on-screen Metal draw and responsive UI have not yet been confirmed. Raw MMIO and secure-monitor transactions remain outside same-CPU timeout protection, so keep the GPU opt-in and preserve the working touch path while validating the userspace bundle.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty. Several apps show a black window (Phone, Photos, Messages) because they need hardware we do not have.
 - **Slow boot:** about 90 seconds on the Apple logo, against a few seconds on a real iPhone.
@@ -166,32 +166,38 @@ must contain `modemst1.img`, `modemst2.img`, `fsg.img`, and `fsc.img`. The
 installer verifies the pinned donor commit, patch hashes, binary hashes and
 `SHA256SUMS` before contacting the phone. It backs up every replaced file and
 the launchd plist, verifies each readback hash, and installs
-`org.ios-sweet.wland` to run `wland auto` at boot. It also removes the stock
-`wifid` device-tree launch restriction, which otherwise hides the direct `en0`
+`org.ios-sweet.wland` to run `wland auto` at boot. Replacements are unlinked and
+recreated because this root does not reliably shrink existing files with
+`O_TRUNC`; rollback readback is verified too. It also removes the stock `wifid`
+device-tree launch restriction, which otherwise hides the direct `en0`
 interface from Settings on toco. Boot-stamp write failures refuse startup.
 Launchd retries only failures from before modem PAS; it never automatically
 boots the modem twice in one boot.
 
 With patch `0008`, `wland` supervises the `l3dhcp` helper after opening `/dev/wlan`.
-The helper waits for asynchronous `en0` creation and interface-up state, uses a
-temporary IPv4 link-local source for the first DHCP broadcast, then replaces it
-with the leased address. It handles renewal, rebinding and expiry, rolls back
-failed address/route changes, and cleans up on link loss or shutdown. DHCP DNS is
-written atomically to `/etc/resolv.conf` only when no resolver file already
-exists, and the lease is also published through `netsvc` for
-SystemConfiguration. The installer sets `WLAND_EN0_DHCP=1`; set it to `0` to
-disable this helper. Set `WLAND_FORCE_UTUN=1` to bypass the kernel bridge and use
-the existing userland `ipnet`/utun DHCP path instead. These are `wland`
-environment variables, not kernel boot arguments.
+The helper waits for asynchronous `en0` creation, explicitly raises the
+interface, then waits for `SIOCGIFMEDIA` to report both `IFM_AVALID` and
+`IFM_ACTIVE`. It uses a temporary IPv4 link-local source for the first DHCP
+broadcast and targets that source's `/16` subnet broadcast, because XNU can
+rewrite `255.255.255.255` to another primary interface before applying
+`IP_BOUND_IF`. Renewal targets the server and rebinding targets the leased subnet
+broadcast. The helper replaces the temporary address with the leased address,
+handles renewal/rebinding/expiry, rolls back failed address/route changes, and
+cleans up on link loss or shutdown. DHCP DNS is written atomically to
+`/etc/resolv.conf` only when no resolver file already exists, and the lease is
+also published through `netsvc` for SystemConfiguration. The installer sets
+`WLAND_EN0_DHCP=1`; set it to `0` to disable this helper. Set
+`WLAND_FORCE_UTUN=1` to bypass the kernel bridge and use the existing userland
+`ipnet`/utun DHCP path instead. These are `wland` environment variables, not
+kernel boot arguments.
 
-Validation must show `l3: waiting for en0 link`, a temporary link-local DHCP
-source, DHCP DISCOVER/OFFER/REQUEST/ACK, an `en0` IPv4 address and netmask, a
-default route through the offered router,
-and successful `netsvc up` publication. Then compare ICMP to a public IP with
-name resolution and test both HTTP and HTTPS in Safari; TLS clock and certificate
-trust remain separate checks. The USB file service has no command-execution
-primitive, so use the persisted `wland` log and Safari until a diagnostic shell
-is available.
+Validation must show a temporary link-local DHCP source, DHCP
+DISCOVER/OFFER/REQUEST/ACK, an `en0` IPv4 address and netmask, a default route
+through the offered router, and successful `netsvc up` publication. Then compare
+ICMP to a public IP with name resolution and test both HTTP and HTTPS in Safari;
+TLS clock and certificate trust remain separate checks. The USB file service has
+no command-execution primitive, so use the persisted `wland` log and Safari until
+a diagnostic shell is available.
 
 The CPU renderer is the frame-time limit on this panel, so `tools/toco-shim.sh` reports a smaller logical display by default: 828×1792 (iPhone XR class, 414×896 points at 2×). It passes the same dimensions to the ADT and the `sweetfb_w`/`sweetfb_h` boot args, and AppleCLCD stretches the frames to 1080×2340. Override both dimensions together with `SWEET_FB_W`/`SWEET_FB_H`; `SWEET_FB_SCALE` controls the ADT scale. The ADT and the boot args must agree.
 
