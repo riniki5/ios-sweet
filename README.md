@@ -1,4 +1,23 @@
-# ios-sweet
+# ios-sweet — iOS 16 bring-up branches
+
+This repository contains two different device tracks. Check the branch before using the hardware or feature claims below.
+
+| Branch | Device | Status |
+| --- | --- | --- |
+| [`main`](https://github.com/riniki5/ios-sweet/tree/main) | Xiaomi Redmi Note 10 Pro (`sweet`, SM7150) | Upstream `sweet` port, documented below |
+| [`codex/springboard-gpu-access`](https://github.com/riniki5/ios-sweet/tree/codex/springboard-gpu-access) | Xiaomi Mi Note 10 Lite (`toco`, SM7150G) | Active development branch and current focus |
+
+## Current `toco` status — 2026-11-27
+
+Known-good CPU-rendered configurations have reached the iOS lock/home screen with working Focaltech touch and hardware buttons. WCN3990 scanning, WPA2 authentication and association work through the kernel `en0` bridge. The new Layer-3 DHCP helper passed [arm64 iOS CI run 45959320701](https://github.com/riniki5/ios-sweet/actions/runs/45959320701), but its verified artifact is not installed on the phone yet; IPv4 routing, DNS, Settings integration and Safari web access remain unverified.
+
+Adreno 618 firmware/GMU/HFI/SMMU/ZAP/SQE bring-up has completed, but a successful native-Metal UI draw and stable 60 FPS have not been confirmed. GPU diagnostic boots can still stall at the Apple logo. The latest boot does not establish working wallpaper, Bluetooth, cellular, speaker audio, haptics, motion/light sensors or Safari video on `toco`; those features must not be inferred from the `sweet` table below.
+
+See the [active `toco` README](https://github.com/riniki5/ios-sweet/blob/codex/springboard-gpu-access/README.md) and [engineering notes](https://github.com/riniki5/ios-sweet/blob/codex/springboard-gpu-access/NOTES.md) for the full build, installation and validation state.
+
+> Experimental bring-up, not a daily-driver phone OS. Apple's security model is largely disabled. The iOS root occupies `userdata` and replaces Android's user data. Never flash `boot`, `dtbo` or `recovery`; test kernels only with `fastboot boot shim-boot.img`.
+
+## Upstream `sweet` port (`main`)
 
 **Apple's iOS 16 running on a Redmi Note 10 Pro.**
 
@@ -10,7 +29,7 @@ As of **2026-11-09**, the phone boots to the **iOS home screen with Metal GPU ac
 
 ## What works
 
-These are results from the development phone, not a compatibility guarantee for every build. All work is on `main`; the records of the former side branches are in [`docs/branches/`](docs/branches/README.md).
+The following table records upstream `sweet` development on `main`, not results from the `toco` phone. These are development-phone results, not a compatibility guarantee for every build; records of former side branches are in [`docs/branches/`](docs/branches/README.md).
 
 | Area | Current result |
 | --- | --- |
