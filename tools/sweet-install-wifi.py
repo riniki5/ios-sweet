@@ -10,8 +10,10 @@ import socket
 
 LAUNCHD = "/System/Library/xpc/launchd.plist"
 JOB = "/System/Library/LaunchDaemons/org.ios-sweet.wland.plist"
+WIFID_JOB = "/System/Library/LaunchDaemons/com.apple.wifid.plist"
 LABEL = "org.ios-sweet.wland"
 DIRECTORIES = (
+    "/var/local",
     "/var/local/bin",
     "/var/local/fw",
     "/var/local/fw/modem",
@@ -191,9 +193,14 @@ def launchd_data(current):
         "UserName": "root",
         "EnvironmentVariables": {
             "PATH": "/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "SWEET_WLAND_LAUNCHD": "1"
+            "SWEET_WLAND_LAUNCHD": "1",
+            "WLAND_EN0_DHCP": "1"
         },
     }
+    wifid = jobs.get(WIFID_JOB)
+    if wifid is not None:
+        # toco exposes en0 directly and has no Apple wlan device-tree node.
+        wifid.pop("_LimitLoadToDeviceTree", None)
     return plistlib.dumps(plist, fmt=plistlib.FMT_BINARY)
 
 

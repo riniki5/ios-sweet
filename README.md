@@ -24,14 +24,15 @@ As of **2026-11-26** the phone boots to iOS, and the touchscreen and hardware bu
 | GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; UI rendering still needs qualification |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power, volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
+| Wi-Fi link | WCN3990 firmware, scans, WPA2 authentication and association work through the kernel `en0` bridge; Layer-3 DHCP/routing/DNS validation is still pending |
 | Battery | IOPMPowerSource service (static 100 %, charging icon) |
 | Device identity | iPhone X (`iPhone10,3` / `D22AP`): no Home button, gesture UI |
 | Activation | Native "Hactivation" path of mobileactivationd, chosen through device-tree security status. No Apple servers involved |
 
 ## What does not work (yet)
 
-- **Wi-Fi is integrated but not yet hardware-qualified.** The WCN3990 kernel transport, pinned iOS 16 `wland`/`netsvc` artifact, and verified installer are ready; restore refuses modified files or damaged backups, and on-phone installation and a scan/join test remain. Bluetooth, cellular, audio, camera, sensors, GPS and SEP / Face ID are still unavailable.
-- **GPU UI rendering is not yet qualified.** The strict CI kernel and matching native Metal bundle are built and verified, but the first temporary boot produced no USB telemetry and the phone is no longer in fastboot. Same-kernel stage-1 and stage-0 diagnostic images are ready; stage 1 can also disable the unconditional DDR vote and BO-pool reservation. NativeAdreno is published only after strict clock and render-profile checks; a successful on-screen Metal draw and responsive UI have not yet been confirmed. Keep the GPU opt-in and preserve the working touch path while validating the userspace bundle.
+- **Wi-Fi associates but has no validated Layer 3 yet.** The installed `0001`–`0007` build scans and joins on `en0`, but `configd` never creates an IPv4 service, default route, or resolver configuration, so Safari cannot load pages. Patch `0008` adds an `en0`-bound DHCP client to `wland`; it passes host syntax, protocol/state and sanitizer checks, but still needs an iOS CI build, reinstall and on-device DHCP/Safari validation. Bluetooth, cellular, audio, camera, sensors, GPS and SEP / Face ID are still unavailable.
+- **GPU UI rendering is not yet qualified.** The strict CI kernel and matching native Metal bundle are built and verified, but the first temporary boot produced no USB telemetry and the phone is no longer in fastboot. A newer stage-0 diagnostic adds `GETLOG` and disables the GPU audit for the safest log-recovery boot; boot it with `SWEET_LOG_PERSIST=0` to retrieve the preceding boot's log. Stage 1 can also disable the unconditional DDR vote and BO-pool reservation. NativeAdreno is published only after strict clock and render-profile checks; a successful on-screen Metal draw and responsive UI have not yet been confirmed. Raw MMIO and secure-monitor transactions remain outside same-CPU timeout protection, so keep the GPU opt-in and preserve the working touch path while validating the userspace bundle.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty. Several apps show a black window (Phone, Photos, Messages) because they need hardware we do not have.
 - **Slow boot:** about 90 seconds on the Apple logo, against a few seconds on a real iPhone.
 - **Security is off:** permissive code signing (AMFI) and sandbox policies, a stub AppleKeyStore, no data protection. Do not put anything personal on it.
@@ -163,9 +164,32 @@ must contain `modemst1.img`, `modemst2.img`, `fsg.img`, and `fsc.img`. The
 installer verifies the pinned donor commit, patch hashes, binary hashes and
 `SHA256SUMS` before contacting the phone. It backs up every replaced file and
 the launchd plist, verifies each readback hash, and installs
-`org.ios-sweet.wland` to run `wland auto` at boot. Boot-stamp write failures
-refuse startup. Launchd retries only failures from before modem PAS; it never
-automatically boots the modem twice in one boot.
+`org.ios-sweet.wland` to run `wland auto` at boot. It also removes the stock
+`wifid` device-tree launch restriction, which otherwise hides the direct `en0`
+interface from Settings on toco. Boot-stamp write failures refuse startup.
+Launchd retries only failures from before modem PAS; it never automatically
+boots the modem twice in one boot.
+
+With patch `0008`, `wland` supervises `wland l3dhcp en0` after opening `/dev/wlan`.
+The helper waits for asynchronous `en0` creation and active media, uses a
+temporary IPv4 link-local source for the first DHCP broadcast, then replaces it
+with the leased address. It handles renewal, rebinding and expiry, rolls back
+failed address/route changes, and cleans up on link loss or shutdown. DHCP DNS is
+written atomically to `/etc/resolv.conf` only when no resolver file already
+exists, and the lease is also published through `netsvc` for
+SystemConfiguration. The installer sets `WLAND_EN0_DHCP=1`; set it to `0` to
+disable this helper. Set `WLAND_FORCE_UTUN=1` to bypass the kernel bridge and use
+the existing userland `ipnet`/utun DHCP path instead. These are `wland`
+environment variables, not kernel boot arguments.
+
+Validation must show `l3: waiting for en0 link`, a temporary link-local DHCP
+source, DHCP DISCOVER/OFFER/REQUEST/ACK, an `en0` IPv4 address and netmask, a
+default route through the offered router,
+and successful `netsvc up` publication. Then compare ICMP to a public IP with
+name resolution and test both HTTP and HTTPS in Safari; TLS clock and certificate
+trust remain separate checks. The USB file service has no command-execution
+primitive, so use the persisted `wland` log and Safari until a diagnostic shell
+is available.
 
 The CPU renderer is the frame-time limit on this panel, so `tools/toco-shim.sh` reports a smaller logical display by default: 828×1792 (iPhone XR class, 414×896 points at 2×). It passes the same dimensions to the ADT and the `sweetfb_w`/`sweetfb_h` boot args, and AppleCLCD stretches the frames to 1080×2340. Override both dimensions together with `SWEET_FB_W`/`SWEET_FB_H`; `SWEET_FB_SCALE` controls the ADT scale. The ADT and the boot args must agree.
 
@@ -202,10 +226,10 @@ The first boot takes about 90 seconds on the Apple logo, then the lock screen ap
 
 ### 5. Read the kernel log
 
-From a minimal file-server boot, fetch the preceding boot's log without recovery:
+From a GPU-disabled file-server boot, fetch the preceding boot's log without recovery:
 
 ```sh
-SWEET_GPU_STAGE=1 SWEET_DDR_VOTE=0 SWEET_BO_POOL_MIB=0 \
+SWEET_GPU_STAGE=0 SWEET_DDR_VOTE=0 SWEET_BO_POOL_MIB=0 \
   SWEET_FILE_SERVER=1 SWEET_LOG_PERSIST=0 \
   tools/toco-shim.sh xnu/out/kernel.development.sweet
 fastboot boot shim/out/shim-boot.img      # temporary; nothing is flashed

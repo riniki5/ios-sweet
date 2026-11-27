@@ -5,7 +5,7 @@
 - iOS 16.7.16 / XNU 8796.141.3 on the Xiaomi Mi Note 10 Lite (`toco`, SM7150G, Adreno 618/a615).
 - Repository: `riniki5/ios-sweet`.
 - Active branch: `codex/springboard-gpu-access`.
-- Priorities: boot reliability, GPU-rendered UI at 60 FPS, then WCN3990 Wi-Fi. Wallpaper work is paused.
+- Priorities: Wi-Fi Layer-3 bring-up, boot reliability, then GPU-rendered UI at 60 FPS. Wallpaper work is paused.
 
 ## Verified local state
 
@@ -15,20 +15,23 @@
 - Compiled 23 Adreno sources and 9 Wi-Fi sources into real Mach-O arm64 objects: zero failures.
 - Internal symbol closure: 112 references, 112 resolved, zero missing across the 32-object set.
 - Strict GPU behavior: 267 MHz default, nonzero GX measurement required, DCVS errors or zero post-transition clock refuse NativeAdreno handoff, exact render-profile readback required, zero-register ring fallback removed.
-- Wi-Fi userspace patches `0001`-`0007` replay cleanly on the pinned donor. The workflow preflights all required sources and no longer lists nonexistent `servreg.c`.
+- Wi-Fi userspace patches `0001`-`0007` replay cleanly on the pinned donor and are installed on the phone. Patch `0008` adds the `en0` DHCP client and also replays cleanly; the workflow preflights all required sources and no longer lists nonexistent `servreg.c`.
 - Wi-Fi fails closed: userspace polls `kern.sweet_smmu_wlan`, refuses modem boot without kernel-verified SMMU readiness, drops the station link on power-off, and accepts binary or ASCII-hex PMKs.
 - The installer validates the pinned donor, line-ending-normalized patch hashes, binary hashes and `SHA256SUMS` before phone access. Boot-stamp write failures refuse startup; launchd retries only pre-PAS failures and never automatically reboots the modem in the same boot. Restore now validates the complete manifest and backup set, verifies every backup hash, and refuses phone files modified after installation; rollback also leaves concurrent modifications untouched. Synthetic install/restore, modified-file, tampered-backup and rollback tests pass, and the final 71-file artifact still preflights at 92,142,485 bytes.
 - The native Metal installer durably saves rollback files and verifies readback hashes. Restore preflights the complete manifest, rejects missing/tampered backups, and refuses files modified after installation before changing the phone; synthetic install-failure, restore, backup-tamper and modified-file tests pass.
-- Final Wi-Fi CI run `45729871060` passed. Its installer-accepted arm64 artifact has `wland` SHA-256 `818a1c161e9a1e3c1a8485a45d650ce9e2e54548e7bc1d7d9858377eb4d3499c` and `netsvc` SHA-256 `005e61f876f9874ef433c9c0be040458c747c17896f6a3a0f8e9e44c8e39c6d9`.
+- Final Wi-Fi CI run `45729871060` passed. Its installed `0001`-`0007` arm64 artifact has `wland` SHA-256 `818a1c161e9a1e3c1a8485a45d650ce9e2e54548e7bc1d7d9858377eb4d3499c` and `netsvc` SHA-256 `005e61f876f9874ef433c9c0be040458c747c17896f6a3a0f8e9e44c8e39c6d9`. A read-only fetch of `/var/local/bin/wland` on 2026-11-26 matches that `wland` hash exactly.
+- On-device Wi-Fi evidence confirms WCN3990 firmware bring-up, scanning, WPA2 authentication/association, key installation and `/dev/wlan` bridge operation on `en0`. It also confirms the Layer-3 failure: `configd` starts but configures only loopback, no `en0` IPv4 address or default route appears, no SystemConfiguration preferences file is created, `/etc/resolv.conf` is absent, and no DHCP follows association. The bridge path skipped `ipnet_init()`, which contained the only DHCP client. The installed job is embedded in `/System/Library/xpc/launchd.plist` and has no `WLAND_EN0_DHCP` setting. The userspace log shows seven link-ups and six AP-initiated deauthentications (reason 3), so link keepalive/stability also needs validation once DHCP starts.
+- Patch `0008` embeds `wland l3dhcp IFNAME` in the existing binary. The parent supervises and reaps the helper, closes inherited descriptors, and restarts it after failure. The helper retries asynchronous interface creation, uses the native `SIOCGIFMEDIA` ABI, and provisions a temporary IPv4 link-local source with an ARP-cache collision check because XNU cannot emit an unnumbered DHCP broadcast. It validates OFFER/ACK/NAK options and server identity, implements T1/T2/rebinding/expiry, rolls back failed address/route changes, and removes stale lease state on link loss or shutdown. Resolver writes are atomic and preserve an existing file; `netsvc` accepts an empty DNS list instead of treating the gateway as DNS, and its exit status is checked after publication. `WLAND_EN0_DHCP=1` is the installer default; `WLAND_EN0_DHCP=0` disables it, and `WLAND_FORCE_UTUN=1` selects the existing utun fallback. The installer also removes `_LimitLoadToDeviceTree` from the stock `wifid` job because the toco device tree exposes no `wlan`/`marconi-wifi` node; restore preserves the original plist. A transform of the fetched phone plist preserves all 531 existing jobs and changes only `wifid` and `org.ios-sweet.wland`. Host strict compilation, static analysis, expanded protocol/state/rollback tests and ASan/UBSan pass; patch replay/reversal and exact donor reconstruction pass. iOS CI, reinstall and device validation remain pending.
 - Validated the final installer payload outside git: 71 files, 92,142,485 bytes; 65 firmware/BDF files, 4 RMTFS images, and 2 binary slots. The binaries are the exact CI artifact, not donor reference builds.
 - Strict XNU CI run `45729558880` passed for `cfd0901c4741e095f1cd675eb1fb0bcf31a74c28`; every repository-owned patch applied. The downloaded arm64 kernel matches `SHA256SUMS`: `9423592272066b05a49852310c8adcdb6278e00dafd0d2a9963f01601cf8b4d3`.
 - Packaged that exact kernel at 267 MHz with Native Metal/Wi-Fi disabled and the file server enabled. The strict stage-9 image is preserved outside git as `work-toco/shim-boot-strict-45729558880.img`, 17,580,032 bytes, SHA-256 `0fe20fd97405e0b39877d77afc3f9c61a30074c52e6ddf99e99bce980929d413`; its payload command line and embedded CI kernel provenance were verified, and ABL accepted the temporary boot.
 - Preserved the original same-kernel stage-1 read-only GPU fallback outside git as `work-toco/shim-boot-stage1-45729558880.img`, SHA-256 `eddd15aabe4d8852e001d6b5e009cc2209d20ecc749bab613854402293ce439c`.
-- Preserved the earlier quieter diagnostics from run `45729558880`: `work-toco/shim-boot-stage1-minimal-45729558880.img`, SHA-256 `2cf618944a5c97ce2b15ea3973a47e01db010715be7e426644141f4ee47b2960`, and `work-toco/shim-boot-stage0-minimal-45729558880.img`, SHA-256 `ea19eab9357c8229fc9bbff490ea9b8cca9ff185302fbd542ad6fa90df7d7275`. The current `shim/out/shim-boot.img` is the newer run-`45738318512` log-export diagnostic documented below; all keep 267 MHz, Native Metal/Wi-Fi off and the file server on.
-- Native Metal CI run `45731157262` passed for `e94577274d0911f10eb14c67691c8e54e759ae42`. The arm64 bundle and legacy compatibility bundle match their file manifests; `SweetNativeMetal` SHA-256 is `83cbe88dec87bb05e18d879300c544f5408db4b1d3f2c0d7e06c1dc372aeb9b7`, the backend is `c895854c1889533dc757faebc795753e93b6f78673001d265eca47e1669112fa`, and ABI SHA-256 `0f5a0900764945bcd3cbb353ace283b658e12d2c28e022866ca35d09fb0cd26a` matches the kernel-generated header after line-ending normalization. No Vulkan, Turnip, or metal2vulkan dependency is present.
+- Preserved the earlier quieter diagnostics from run `45729558880`: `work-toco/shim-boot-stage1-minimal-45729558880.img`, SHA-256 `2cf618944a5c97ce2b15ea3973a47e01db010715be7e426644141f4ee47b2960`, and `work-toco/shim-boot-stage0-minimal-45729558880.img`, SHA-256 `ea19eab9357c8229fc9bbff490ea9b8cca9ff185302fbd542ad6fa90df7d7275`. The current `shim/out/shim-boot.img` is the run-`45738318512` stage-0 log-export diagnostic documented below; all keep 267 MHz, Native Metal/Wi-Fi off and the file server on.
+- Native Metal CI run `45731157262` passed for `e94577274d0911f10eb14c67691c8e54e759ae42`. The arm64 bundle and legacy compatibility bundle match their file manifests; `SweetNativeMetal` SHA-256 is `83cbe88dec87bb05e18d879300c544f5408db4b1d3f2c0d7e06c1dc372aeb9b7`, the backend is `c895854c1889533dc757faebc795753e93b6f78673001d265eca47e1669112fa`, and ABI SHA-256 `0f5a0900764945bcd3cbb353ace283b658e12d2c28e022866ca35d09fb0cd26a` matches the kernel-generated header after line-ending normalization. No Vulkan, Turnip, or metal2vulkan dependency is present. Native Metal CI run `45738318644` also passed for the `GETLOG` kernel commit `d27821f3ad4035429e8343aca830a245017c133a`.
 - Patch `0170` adds a read-only `GETLOG` command. It snapshots the complete 4,198,400-byte persistent area under the UFS lock before socket I/O and validates the `SWEETLOG` header. The full patch series replays cleanly, synthetic wrapped-log, phone-error, truncated-transfer and invalid-size tests pass, and local compile-command replay reports `0 of 2 files failed` for `sweet_ufs.c` and `sweet_files.c`.
 - XNU CI run `45738318512` passed for `d27821f3ad4035429e8343aca830a245017c133a`; every repository-owned patch applied. The downloaded arm64 kernel matches `SHA256SUMS`: `9b0d86752c37c0a41577a2be55efca6014eeb6de431b93d807ecbc1d25f3ac9a`.
-- Packaged and verified the log-preserving stage-1 diagnostic image from that exact kernel as `work-toco/shim-boot-stage1-logexport-45738318512.img`, 17,580,032 bytes, SHA-256 `d4ecdf4d89fb6290029b7bb199a133bdf622f19a29411d0dcdb1f299692feb79`. Its payload command line includes `sweetgpu=1 sweetgpukhz=267000 sweetddr=0 sweetbopool=0 sweetfiles=1 sweetlog=0 sweetwifid=0 sweetnative=0 sweetfb_hz=60`; every embedded kernel segment matches the CI kernel. On-device retrieval remains pending.
+- Packaged and verified two log-preserving diagnostics from that exact kernel. The stage-0 image `work-toco/shim-boot-stage0-logexport-45738318512.img`, 17,580,032 bytes, SHA-256 `3b10675f5339cfcbed697a8d420966ccacd6306edc6ea4f53fa2401d731861ba`, disables the GPU audit and is the safest first log-recovery boot. The stage-1 image `work-toco/shim-boot-stage1-logexport-45738318512.img`, SHA-256 `d4ecdf4d89fb6290029b7bb199a133bdf622f19a29411d0dcdb1f299692feb79`, retains read-only GPU diagnostics. Both use `sweetgpukhz=267000 sweetddr=0 sweetbopool=0 sweetfiles=1 sweetlog=0 sweetwifid=0 sweetnative=0 sweetfb_hz=60`; every embedded kernel segment matches the CI kernel. Read-only `GETLOG` retrieval from the phone succeeded on 2026-11-26: 4,198,400 raw bytes decoded to 8,446 log lines, with no panic marker in the decoded snapshot.
+- Patch `0171` bounds the GX counter consistency read to eight attempts, reasserts the 60-second startup sleep against one absolute deadline and aborts on wait-assertion failure, and makes DCVS timeout return before any ACK write. The patch replays on the reconstructed baseline, local compile-command replay reports `0 of 2 files failed`, and synthetic counter, startup-deadline and DCVS fail-closed tests pass. Full kernel CI remains pending.
 
 ## Hardware evidence
 
@@ -39,10 +42,11 @@
 
 ## Active blockers
 
-- Strict XNU, final Wi-Fi, and native Metal artifacts are verified. The first strict kernel boot was accepted by ABL but produced no USB enumeration, file-service response, or UDP telemetry during the 180-second observation. Patch `0170` and its CI-verified `sweetfiles=1 sweetlog=0` diagnostic image are now ready to retrieve the preceding boot's persistent log without recovery; the phone is not currently visible in fastboot, so no temporary boot or retrieval has been attempted yet.
+- Strict XNU, final Wi-Fi, and native Metal artifacts are verified. Patch `0170` and its CI-verified `sweetfiles=1 sweetlog=0` diagnostic images enabled read-only persistent-log retrieval without recovery; the current phone snapshot has been fetched and decoded. Layer-3 Wi-Fi remains blocked on building and installing the new `0008` userspace artifact.
 - XNU CI now treats every repository-owned patch as required. The redundant `0150` delay patch was removed because `0148` already supplies the same 60-second delay.
-- No Wi-Fi binaries, launchd job, firmware, or RMTFS images have been installed on the phone.
+- Wi-Fi binaries, launchd job, firmware and RMTFS images are installed and link-layer association works, but the installed `0001`-`0007` build has no DHCP client on the kernel `en0` path. Patch `0008` is not built by CI or installed yet, so IPv4 routing, DNS, Settings integration and Safari HTTP/HTTPS remain unverified.
 - Shader/GMEM execution and the NativeAdreno/Metal userspace ABI remain unqualified on hardware.
+- A raw GPU MMIO load/store or `smc #0` transaction can still fail to return; no same-CPU software deadline can preempt it. Stage 1 must stay on known-clocked status paths, and later stages need an independent watchdog/secure-monitor timeout before they are considered boot-safe.
 - Protected Wi-Fi credential persistence is not implemented; bring-up must use open or non-sensitive networks.
 - The file service has no `STAT` command, so Wi-Fi restore preserves contents and intended modes but not arbitrary pre-existing permission modes.
 
@@ -61,17 +65,29 @@ Both workflows trigger on pushes to `main` and `codex/springboard-gpu-access`.
 After the workflows are present on the default branch they can also be dispatched
 with `gh workflow run xnu.yml` and `gh workflow run wifi-0239.yml`.
 
-The current diagnostic image is already packaged and verified at `work-toco/shim-boot-stage1-logexport-45738318512.img`. When the phone is available, boot that exact image and fetch the preceding log:
+For Wi-Fi Layer 3, first publish patch `0008` and pass `wifi-0239.yml`, then
+download and verify its new `wland`/`netsvc` artifact and reinstall it with the
+existing backed-up installer. The previously installed `0001`-`0007` artifact
+does not contain the helper. After reboot and association, the persisted log must
+show `l3: waiting for en0 link`, the temporary link-local source, DHCP
+DISCOVER/OFFER/REQUEST/ACK, the configured lease and `netsvc up`; then validate
+the `en0` address/default route, DNS, ICMP,
+HTTP and HTTPS. The USB file service cannot execute diagnostic commands, and no
+new `userdata` flash is required for this installer-based test.
+
+The current diagnostic image is already packaged and verified at `work-toco/shim-boot-stage0-logexport-45738318512.img`. For future log recovery, boot that exact GPU-disabled image first and fetch the preceding log:
 
 ```sh
-fastboot boot work-toco/shim-boot-stage1-logexport-45738318512.img
+fastboot boot work-toco/shim-boot-stage0-logexport-45738318512.img
 python3 tools/sweet-log-usb.py logs/toco.txt
 ```
+
+Use `work-toco/shim-boot-stage1-logexport-45738318512.img` only when read-only GPU diagnostics are also needed.
 
 For a future kernel, after both workflows pass, download and verify the artifacts, then package the exact kernel:
 
 ```sh
-SWEET_GPU_STAGE=1 SWEET_GPU_KHZ=267000 SWEET_DDR_VOTE=0 SWEET_BO_POOL_MIB=0 \
+SWEET_GPU_STAGE=0 SWEET_GPU_KHZ=267000 SWEET_DDR_VOTE=0 SWEET_BO_POOL_MIB=0 \
   SWEET_WIFI=0 SWEET_FILE_SERVER=1 SWEET_LOG_PERSIST=0 \
   tools/toco-shim.sh xnu/out/kernel.development.sweet
 fastboot boot shim/out/shim-boot.img
@@ -90,7 +106,15 @@ Do not boot older scratch shims: they still contain the 800 MHz default, permiss
 - `work-toco/wifi-payload-validation.json`: staged payload manifest.
 - `work-toco/xnu-run-45208283340/`: downloaded CI buildtree used for compile-command replay; not a complete linkable tree.
 - `work-toco/xnu-ci-45738318512-kernel/`: verified CI kernel artifact for the `GETLOG` diagnostic.
-- `work-toco/shim-boot-stage1-logexport-45738318512.img`: current log-preserving stage-1 diagnostic image.
+- `work-toco/shim-boot-stage0-logexport-45738318512.img`: current GPU-disabled log-preserving diagnostic image.
+- `work-toco/shim-boot-stage1-logexport-45738318512.img`: log-preserving diagnostic with read-only GPU checks.
+- `work-toco/wifi-l3-baseline/`: pristine post-`0007` donor tree used to replay and reverse-check patch `0008`.
+- `work-toco/wifi-l3-donor/`: post-`0008` donor reconstruction used for exact patch comparison.
+- `work-toco/l3-hostcheck/`: temporary BSD compatibility headers and DHCP protocol/lease harness; not an iOS build.
+- `work-toco/toco-current.txt` / `.bin`: read-only persistent log fetched with `GETLOG` and decoded on 2026-11-26; raw device data stays outside git.
+- `work-toco/wland-current.log`: read-only userspace Wi-Fi log used to confirm association, missing DHCP and repeated link loss.
+- `work-toco/phone-wland`: read-only installed `wland` binary; SHA-256 matches CI run `45729871060`.
+- `work-toco/phone-launchd.plist`: read-only launchd snapshot confirming the installed job and network daemon configuration.
 
 ---
 

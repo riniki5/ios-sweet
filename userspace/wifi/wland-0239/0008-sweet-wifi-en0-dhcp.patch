@@ -1,0 +1,1119 @@
+diff --git a/phone/tools/netsvc.m b/phone/tools/netsvc.m
+index d82a382..02b9579 100755
+--- a/phone/tools/netsvc.m
++++ b/phone/tools/netsvc.m
+@@ -4,7 +4,7 @@
+  * route), mDNSResponder gets DNS servers and reachability says yes. Default: the USB link (ue0,
+  * 192.168.7.2 via the Mac, which NATs for it: tools/mac-share.sh); wland publishes the WLAN's utun.
+  *   netsvc [up]                               publish ue0 (again)
+- *   netsvc up IF ADDR MASK ROUTER DNS [DNS2]  publish IF (one service per interface name)
++ *   netsvc up IF ADDR MASK ROUTER [DNS [DNS2]]  publish IF (one service per interface name)
+  *   netsvc down [IF]                          remove        netsvc show [IF]     dump the keys
+  * Signed with netsvc-ents.plist (SCDynamicStore write access).
+  */
+@@ -49,14 +49,15 @@ int main(int argc, char **argv)
+ 		NSString *addr = @"192.168.7.2", *mask = @"255.255.255.0", *router = @"192.168.7.1";
+ 		NSArray *servers = @[ @"1.1.1.1", @"8.8.8.8" ];
+ 		if (!strcmp(cmd, "up") && argc > 2) {
+-			if (argc < 7) {
+-				fprintf(stderr, "usage: netsvc up IF ADDR MASK ROUTER DNS [DNS2]\n");
++			if (argc < 6) {
++				fprintf(stderr, "usage: netsvc up IF ADDR MASK ROUTER [DNS [DNS2]]\n");
+ 				return 2;
+ 			}
+ 			addr = @(argv[3]);
+ 			mask = @(argv[4]);
+ 			router = @(argv[5]);
+-			servers = argc > 7 ? @[ @(argv[6]), @(argv[7]) ] : @[ @(argv[6]) ];
++			servers = argc > 7 ? @[ @(argv[6]), @(argv[7]) ] :
++				(argc > 6 ? @[ @(argv[6]) ] : @[]);
+ 		}
+ 		SCDynamicStoreRef st = SCDynamicStoreCreate(NULL, CFSTR("netsvc"), NULL, NULL);
+ 		if (!st) {
+diff --git a/phone/wifi/bridge.c b/phone/wifi/bridge.c
+index 8f22298..27e17d2 100755
+--- a/phone/wifi/bridge.c
++++ b/phone/wifi/bridge.c
+@@ -1,8 +1,8 @@
+ /*
+  * The kernel's Wi-Fi station over /dev/wlan (flamewlan.h; the kernel side is bsd/dev/flame_wlan.c, under en0
+  * and wifid's Apple80211 requests): wifid's scans and joins come here as requests, en0's frames both ways.
+- * In this mode iOS does the IP side itself on en0 (configd, DHCP), so ipnet.c's utun is not made. Without the
+- * device (an older kernel, or boot-arg sweetwifid=0) wland keeps its own utun.
++ * In this mode wland's l3dhcp client configures en0 after association, because configd has no en0 service yet.
++ * Without the device (an older kernel, boot-arg sweetwifid=0, or WLAND_FORCE_UTUN) wland keeps its own utun.
+  */
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -87,7 +87,7 @@ static void bridge_list(int32_t status)
+ 
+ int bridge_open(void)
+ {
+-	bfd = open("/dev/wlan", O_RDWR | O_NONBLOCK);
++	bfd = open("/dev/wlan", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+ 	if (bfd < 0) {
+ 		printf("bridge: no /dev/wlan (%s): wland's own utun\n", strerror(errno));
+ 		return -1;
+diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
+new file mode 100755
+index 0000000..1bdde95
+--- /dev/null
++++ b/phone/wifi/l3dhcp.c
+@@ -0,0 +1,868 @@
++#include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <mach/mach_time.h>
++#include <net/if.h>
++#include <net/if_arp.h>
++#include <net/if_dl.h>
++#include <net/if_media.h>
++#include <netinet/in.h>
++#include <signal.h>
++#include <spawn.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
++#include <sys/sockio.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#ifndef IP_BOUND_IF
++#define IP_BOUND_IF 25
++#endif
++
++extern char **environ;
++
++#define NETSVC "/var/local/bin/netsvc"
++#define ROUTE "/sbin/route"
++#define RESOLV_CONF "/etc/resolv.conf"
++#define RESOLV_TMP "/etc/resolv.conf.l3.tmp"
++
++enum { D_IDLE, D_SELECTING, D_REQUESTING, D_BOUND, D_RENEWING, D_REBINDING };
++
++static volatile sig_atomic_t stopping;
++static pid_t parent_pid;
++static int dstate;
++static uint32_t xid, offered, server_id, my_ip, my_mask, my_broadcast, my_router;
++static uint32_t my_dns[2], lease_seconds, bootstrap_ip;
++static uint64_t sent_ms, started_ms, bound_ms, next_start_ms, renew_ms, rebind_ms, expires_ms;
++static unsigned tries;
++static char domain[256], my_domain[256];
++static int resolv_owned;
++static int control_fd = -1, udp_fd = -1;
++static uint64_t last_media_error_ms;
++
++static uint64_t now_ms(void)
++{
++    static mach_timebase_info_data_t timebase;
++    if (!timebase.denom)
++        mach_timebase_info(&timebase);
++    return mach_absolute_time() * timebase.numer / timebase.denom / 1000000;
++}
++
++static void log_msg(const char *fmt, ...)
++{
++    va_list ap;
++    printf("[%6llu] l3: ", (unsigned long long)now_ms());
++    va_start(ap, fmt);
++    vprintf(fmt, ap);
++    va_end(ap);
++    putchar('\n');
++}
++
++static void on_stop(int sig)
++{
++    (void)sig;
++    stopping = 1;
++}
++
++static void on_chld(int sig)
++{
++    (void)sig;
++}
++
++static int close_on_exec(int fd)
++{
++    int flags = fcntl(fd, F_GETFD);
++    return flags < 0 ? -1 : fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
++}
++
++static int spawn_actions(posix_spawn_file_actions_t *actions)
++{
++    int error = posix_spawn_file_actions_init(actions);
++    if (error)
++        return error;
++    if (control_fd >= 0 && (error = posix_spawn_file_actions_addclose(actions, control_fd)) != 0) {
++        posix_spawn_file_actions_destroy(actions);
++        return error;
++    }
++    if (udp_fd >= 0 && (error = posix_spawn_file_actions_addclose(actions, udp_fd)) != 0) {
++        posix_spawn_file_actions_destroy(actions);
++        return error;
++    }
++    return 0;
++}
++
++static int run_wait(const char *path, char *const argv[])
++{
++    posix_spawn_file_actions_t actions;
++    int error = spawn_actions(&actions);
++    if (error) {
++        log_msg("%s file actions: %s", path, strerror(error));
++        return -1;
++    }
++    pid_t pid;
++    error = posix_spawn(&pid, path, &actions, NULL, argv, environ);
++    posix_spawn_file_actions_destroy(&actions);
++    if (error) {
++        log_msg("%s: %s", path, strerror(error));
++        return -1;
++    }
++    int status = 0;
++    while (waitpid(pid, &status, 0) < 0) {
++        if (errno != EINTR) {
++            log_msg("wait %s: %s", path, strerror(errno));
++            return -1;
++        }
++    }
++    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
++        log_msg("%s exited with status %#x", path, status);
++        return -1;
++    }
++    return 0;
++}
++
++static int link_active(int control, const char *ifname)
++{
++    struct ifmediareq request;
++    int media[1] = { 0 };
++    memset(&request, 0, sizeof(request));
++    snprintf(request.ifm_name, sizeof(request.ifm_name), "%s", ifname);
++    request.ifm_count = 1;
++    request.ifm_ulist = media;
++    if (ioctl(control, SIOCGIFMEDIA, &request) < 0) {
++        uint64_t now = now_ms();
++        if (now - last_media_error_ms > 5000) {
++            log_msg("%s SIOCGIFMEDIA: %s", ifname, strerror(errno));
++            last_media_error_ms = now;
++        }
++        return -1;
++    }
++    return (request.ifm_status & IFM_AVALID) && (request.ifm_status & IFM_ACTIVE);
++}
++
++static uint32_t primary_address(int control, const char *ifname)
++{
++    struct ifreq request;
++    struct sockaddr_in *address;
++    memset(&request, 0, sizeof(request));
++    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
++    if (ioctl(control, SIOCGIFADDR, &request) < 0)
++        return 0;
++    address = (struct sockaddr_in *)&request.ifr_addr;
++    return address->sin_family == AF_INET ? address->sin_addr.s_addr : 0;
++}
++
++static int interface_up(int control, const char *ifname)
++{
++    struct ifreq request;
++    memset(&request, 0, sizeof(request));
++    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
++    if (ioctl(control, SIOCGIFFLAGS, &request) < 0) {
++        log_msg("%s SIOCGIFFLAGS: %s", ifname, strerror(errno));
++        return -1;
++    }
++    if (request.ifr_flags & IFF_UP)
++        return 0;
++    request.ifr_flags |= IFF_UP;
++    if (ioctl(control, SIOCSIFFLAGS, &request) < 0) {
++        log_msg("%s SIOCSIFFLAGS: %s", ifname, strerror(errno));
++        return -1;
++    }
++    return 0;
++}
++
++static int address_change(int control, const char *ifname, uint32_t address, uint32_t mask,
++                          uint32_t broadcast, int add)
++{
++    if (add) {
++        struct ifaliasreq alias;
++        struct sockaddr_in *sockaddr;
++        memset(&alias, 0, sizeof(alias));
++        snprintf(alias.ifra_name, sizeof(alias.ifra_name), "%s", ifname);
++        sockaddr = (struct sockaddr_in *)&alias.ifra_addr;
++        sockaddr->sin_len = sizeof(*sockaddr);
++        sockaddr->sin_family = AF_INET;
++        sockaddr->sin_addr.s_addr = address;
++        sockaddr = (struct sockaddr_in *)&alias.ifra_broadaddr;
++        sockaddr->sin_len = sizeof(*sockaddr);
++        sockaddr->sin_family = AF_INET;
++        sockaddr->sin_addr.s_addr = broadcast;
++        sockaddr = (struct sockaddr_in *)&alias.ifra_mask;
++        sockaddr->sin_len = sizeof(*sockaddr);
++        sockaddr->sin_family = AF_INET;
++        sockaddr->sin_addr.s_addr = mask;
++        if (ioctl(control, SIOCAIFADDR, &alias) < 0) {
++            log_msg("%s SIOCAIFADDR: %s", ifname, strerror(errno));
++            return -1;
++        }
++        if (interface_up(control, ifname) < 0) {
++            address_change(control, ifname, address, 0, 0, 0);
++            return -1;
++        }
++        return 0;
++    }
++    struct ifreq request;
++    struct sockaddr_in *sockaddr;
++    memset(&request, 0, sizeof(request));
++    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
++    sockaddr = (struct sockaddr_in *)&request.ifr_addr;
++    sockaddr->sin_len = sizeof(*sockaddr);
++    sockaddr->sin_family = AF_INET;
++    sockaddr->sin_addr.s_addr = address;
++    if (ioctl(control, SIOCDIFADDR, &request) < 0 && errno != EADDRNOTAVAIL) {
++        log_msg("%s SIOCDIFADDR: %s", ifname, strerror(errno));
++        return -1;
++    }
++    return 0;
++}
++
++static int default_route(const char *ifname, uint32_t gateway, int add)
++{
++    char gateway_text[INET_ADDRSTRLEN];
++    if (add) {
++        if (!gateway)
++            return 0;
++        if (!inet_ntop(AF_INET, &gateway, gateway_text, sizeof(gateway_text)))
++            return -1;
++    }
++    char *remove[] = { "route", "delete", "default", "-ifp", (char *)ifname, NULL };
++    char *insert[] = { "route", "add", "default", gateway_text, "-ifp", (char *)ifname, NULL };
++    return run_wait(ROUTE, add ? insert : remove);
++}
++
++static int valid_address(uint32_t address)
++{
++    uint32_t host = ntohl(address);
++    return address && (host >> 24) != 127 && host < 0xe0000000u && host != 0xffffffffu;
++}
++
++static int valid_mask(uint32_t mask)
++{
++    uint32_t host = ntohl(mask), inverse = ~host;
++    return mask && inverse != 0xffffffffu && (inverse & (inverse + 1)) == 0;
++}
++
++static int copy_domain(const uint8_t *value, unsigned length, char *output, size_t capacity)
++{
++    if (!length || length >= capacity || length > 253)
++        return -1;
++    for (unsigned i = 0; i < length; i++) {
++        unsigned char c = value[i];
++        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++              (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
++            return -1;
++    }
++    if (value[0] == '.' || value[length - 1] == '.')
++        return -1;
++    memcpy(output, value, length);
++    output[length] = 0;
++    return 0;
++}
++
++static void resolv_remove(void)
++{
++    if (!resolv_owned)
++        return;
++    if (unlink(RESOLV_CONF) < 0 && errno != ENOENT)
++        log_msg("%s: %s", RESOLV_CONF, strerror(errno));
++    resolv_owned = 0;
++}
++
++static int write_resolv_conf(uint32_t servers[2], const char *search_domain)
++{
++    if (!servers[0] && !servers[1]) {
++        resolv_remove();
++        return 0;
++    }
++    FILE *existing = fopen(RESOLV_CONF, "r");
++    if (existing) {
++        fclose(existing);
++        if (!resolv_owned) {
++            log_msg("preserving existing %s", RESOLV_CONF);
++            return 0;
++        }
++    } else if (errno != ENOENT) {
++        log_msg("%s: %s", RESOLV_CONF, strerror(errno));
++        return -1;
++    }
++    FILE *file = fopen(RESOLV_TMP, "w");
++    if (!file) {
++        log_msg("%s: %s", RESOLV_TMP, strerror(errno));
++        return -1;
++    }
++    char text[INET_ADDRSTRLEN];
++    int failed = 0;
++    for (unsigned i = 0; i < 2; i++) {
++        if (servers[i] && valid_address(servers[i]) &&
++            inet_ntop(AF_INET, &servers[i], text, sizeof(text)))
++            failed |= fprintf(file, "nameserver %s\n", text) < 0;
++    }
++    if (search_domain && search_domain[0])
++        failed |= fprintf(file, "search %s\n", search_domain) < 0;
++    if (fflush(file) != 0 || fsync(fileno(file)) != 0)
++        failed = 1;
++    if (fclose(file) != 0)
++        failed = 1;
++    if (failed || rename(RESOLV_TMP, RESOLV_CONF) < 0) {
++        log_msg("writing %s: %s", RESOLV_CONF, strerror(errno));
++        unlink(RESOLV_TMP);
++        return -1;
++    }
++    resolv_owned = 1;
++    return 0;
++}
++
++static int arp_cached_conflict(int control, uint32_t address, const uint8_t mac[6])
++{
++    struct arpreq request;
++    struct sockaddr_in *ipv4;
++    memset(&request, 0, sizeof(request));
++    ipv4 = (struct sockaddr_in *)&request.arp_pa;
++    ipv4->sin_len = sizeof(*ipv4);
++    ipv4->sin_family = AF_INET;
++    ipv4->sin_addr.s_addr = address;
++    if (ioctl(control, SIOCGARP, &request) < 0 || !(request.arp_flags & ATF_COM))
++        return 0;
++    struct sockaddr_dl *link = (struct sockaddr_dl *)&request.arp_ha;
++    return link->sdl_alen == 6 && memcmp(LLADDR(link), mac, 6) != 0;
++}
++
++/* XNU needs an interface IPv4 address before it can source the first DHCP broadcast. */
++static int bootstrap_prepare(int control, const char *ifname, const uint8_t mac[6])
++{
++    if (primary_address(control, ifname))
++        return interface_up(control, ifname);
++    for (unsigned attempt = 0; attempt < 8; attempt++) {
++        uint32_t host = 1 + arc4random_uniform(0xfdff);
++        if ((host & 0xff) == 0 || (host & 0xff) == 0xff)
++            continue;
++        uint32_t address = htonl(0xa9fe0000u | host);
++        if (arp_cached_conflict(control, address, mac))
++            continue;
++        if (address_change(control, ifname, address, htonl(0xffff0000),
++                           address | htonl(0x0000ffff), 1) < 0)
++            return -1;
++        bootstrap_ip = address;
++        char text[INET_ADDRSTRLEN];
++        inet_ntop(AF_INET, &address, text, sizeof(text));
++        log_msg("temporary DHCP source %s/16 on %s", text, ifname);
++        return 0;
++    }
++    log_msg("could not select a link-local DHCP source");
++    return -1;
++}
++
++static void bootstrap_remove(int control, const char *ifname)
++{
++    if (!bootstrap_ip)
++        return;
++    if (bootstrap_ip != my_ip)
++        address_change(control, ifname, bootstrap_ip, 0, 0, 0);
++    bootstrap_ip = 0;
++}
++
++static void restore_lease(int control, const char *ifname, uint32_t address, uint32_t mask,
++                          uint32_t broadcast, uint32_t router)
++{
++    if (!address)
++        return;
++    if (primary_address(control, ifname) != address &&
++        address_change(control, ifname, address, mask, broadcast, 1) < 0)
++        return;
++    if (router && default_route(ifname, router, 1) < 0)
++        log_msg("could not restore previous default route");
++}
++
++static int lease_configure(int control, const char *ifname, uint32_t address, uint32_t mask,
++                           uint32_t router, uint32_t broadcast, uint32_t servers[2], uint32_t seconds)
++{
++    char ip[INET_ADDRSTRLEN], netmask[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
++    char dns0[INET_ADDRSTRLEN] = "", dns1[INET_ADDRSTRLEN] = "";
++    uint32_t effective_dns[2] = { servers[0], servers[1] };
++    if (!effective_dns[0] && !effective_dns[1]) {
++        effective_dns[0] = my_dns[0];
++        effective_dns[1] = my_dns[1];
++    }
++    const char *search_domain = domain[0] ? domain : my_domain;
++    int network_changed = !my_ip || my_ip != address || my_mask != mask || my_broadcast != broadcast;
++    int route_changed = network_changed || my_router != router;
++    uint32_t old_ip = my_ip, old_mask = my_mask, old_broadcast = my_broadcast, old_router = my_router;
++
++    if (route_changed && old_router && default_route(ifname, old_router, 0) < 0)
++        return -1;
++    if (old_ip && (old_ip != address || network_changed) &&
++        address_change(control, ifname, old_ip, 0, 0, 0) < 0) {
++        if (old_router)
++            default_route(ifname, old_router, 1);
++        return -1;
++    }
++    if (network_changed && address_change(control, ifname, address, mask, broadcast, 1) < 0) {
++        restore_lease(control, ifname, old_ip, old_mask, old_broadcast, old_router);
++        return -1;
++    }
++    if (route_changed && router && default_route(ifname, router, 1) < 0) {
++        if (network_changed)
++            address_change(control, ifname, address, 0, 0, 0);
++        restore_lease(control, ifname, old_ip, old_mask, old_broadcast, old_router);
++        return -1;
++    }
++    bootstrap_remove(control, ifname);
++
++    my_ip = address;
++    my_mask = mask;
++    my_broadcast = broadcast;
++    my_router = router;
++    my_dns[0] = effective_dns[0];
++    my_dns[1] = effective_dns[1];
++    snprintf(my_domain, sizeof(my_domain), "%s", search_domain);
++    lease_seconds = seconds;
++    inet_ntop(AF_INET, &address, ip, sizeof(ip));
++    inet_ntop(AF_INET, &mask, netmask, sizeof(netmask));
++    inet_ntop(AF_INET, &router, gw, sizeof(gw));
++    if (effective_dns[0])
++        inet_ntop(AF_INET, &effective_dns[0], dns0, sizeof(dns0));
++    if (effective_dns[1])
++        inet_ntop(AF_INET, &effective_dns[1], dns1, sizeof(dns1));
++    if (write_resolv_conf(effective_dns, search_domain) < 0)
++        log_msg("continuing with SystemConfiguration DNS only");
++    char *publish[] = { "netsvc", "up", (char *)ifname, ip, netmask, gw,
++                        dns0[0] ? dns0 : NULL, dns1[0] ? dns1 : NULL, NULL };
++    if (run_wait(NETSVC, publish) < 0)
++        log_msg("continuing without SystemConfiguration publication");
++    log_msg("lease %s mask %s router %s dns %s %s for %u s", ip, netmask, gw,
++            dns0[0] ? dns0 : "(none)", dns1[0] ? dns1 : "", seconds);
++    return 0;
++}
++
++static void lease_release(int control, const char *ifname)
++{
++    if (my_ip) {
++        if (my_router)
++            default_route(ifname, my_router, 0);
++        address_change(control, ifname, my_ip, 0, 0, 0);
++        char *remove[] = { "netsvc", "down", (char *)ifname, NULL };
++        run_wait(NETSVC, remove);
++    }
++    bootstrap_remove(control, ifname);
++    resolv_remove();
++    if (my_ip)
++        log_msg("lease released");
++    my_ip = 0;
++    my_mask = 0;
++    my_broadcast = 0;
++    my_router = 0;
++    my_dns[0] = 0;
++    my_dns[1] = 0;
++    lease_seconds = 0;
++    domain[0] = 0;
++    my_domain[0] = 0;
++    offered = 0;
++    server_id = 0;
++    renew_ms = 0;
++    rebind_ms = 0;
++    expires_ms = 0;
++}
++
++static uint32_t option_u32(const uint8_t *value, unsigned length)
++{
++    uint32_t result;
++    if (length != 4)
++        return 0;
++    memcpy(&result, value, sizeof(result));
++    return ntohl(result);
++}
++
++static void dhcp_abort(int control, const char *ifname, const char *reason)
++{
++    log_msg("DHCP %s; restarting", reason);
++    lease_release(control, ifname);
++    dstate = D_IDLE;
++    next_start_ms = now_ms() + 1000;
++}
++
++static void dhcp_receive(int control, const char *ifname, const uint8_t mac[6],
++                         const uint8_t *packet, size_t length)
++{
++    if (length < 240 || packet[0] != 2 || packet[1] != 1 || packet[2] != 6 ||
++        memcmp(packet + 4, &xid, 4) || memcmp(packet + 28, mac, 6) ||
++        packet[236] != 99 || packet[237] != 130 || packet[238] != 83 || packet[239] != 99)
++        return;
++    uint32_t address, mask = 0, router = 0, identifier = 0, seconds = 0, broadcast = 0;
++    uint32_t servers[2] = { 0, 0 }, server_address;
++    char parsed_domain[256] = { 0 };
++    unsigned seen = 0;
++    int message = 0, message_count = 0, ended = 0, lease_present = 0;
++    memcpy(&address, packet + 16, 4);
++    memcpy(&server_address, packet + 20, 4);
++    for (size_t offset = 240; offset < length;) {
++        uint8_t option = packet[offset];
++        if (option == 255) {
++            ended = 1;
++            break;
++        }
++        if (option == 0) {
++            offset++;
++            continue;
++        }
++        if (offset + 2 > length)
++            return;
++        uint8_t option_length = packet[offset + 1];
++        const uint8_t *value = packet + offset + 2;
++        if (offset + 2 + option_length > length)
++            return;
++        switch (option) {
++        case 1:
++            if ((seen & 0x01) || option_length != 4)
++                return;
++            seen |= 0x01;
++            memcpy(&mask, value, 4);
++            break;
++        case 3:
++            if ((seen & 0x02) || !option_length || option_length % 4)
++                return;
++            seen |= 0x02;
++            memcpy(&router, value, 4);
++            break;
++        case 6:
++            if ((seen & 0x04) || !option_length || option_length % 4)
++                return;
++            seen |= 0x04;
++            memcpy(&servers[0], value, 4);
++            if (option_length >= 8)
++                memcpy(&servers[1], value + 4, 4);
++            break;
++        case 15:
++            if ((seen & 0x08) || copy_domain(value, option_length, parsed_domain, sizeof(parsed_domain)) < 0)
++                return;
++            seen |= 0x08;
++            break;
++        case 28:
++            if ((seen & 0x10) || option_length != 4)
++                return;
++            seen |= 0x10;
++            memcpy(&broadcast, value, 4);
++            break;
++        case 51:
++            if (seen & 0x20)
++                return;
++            seen |= 0x20;
++            seconds = option_u32(value, option_length);
++            if (!seconds)
++                return;
++            lease_present = 1;
++            break;
++        case 52:
++            return;
++        case 53:
++            if (option_length != 1 || ++message_count != 1)
++                return;
++            message = value[0];
++            break;
++        case 54:
++            if ((seen & 0x40) || option_length != 4)
++                return;
++            seen |= 0x40;
++            memcpy(&identifier, value, 4);
++            break;
++        case 119: {
++            if (seen & 0x80)
++                return;
++            seen |= 0x80;
++            unsigned token = 0;
++            while (token < option_length && value[token] != ' ' && value[token] != '\t' &&
++                   value[token] != '\r' && value[token] != '\n')
++                token++;
++            if (token && copy_domain(value, token, parsed_domain, sizeof(parsed_domain)) < 0)
++                return;
++            break;
++        }
++        default:
++            break;
++        }
++        offset += 2 + option_length;
++    }
++    if (ended && message_count == 1 && !identifier)
++        identifier = server_address;
++    if (!ended || message_count != 1 || !identifier || !valid_address(identifier))
++        return;
++    if (mask && !valid_mask(mask))
++        return;
++    if (router && !valid_address(router))
++        return;
++    if (!valid_address(servers[0]))
++        servers[0] = 0;
++    if (!valid_address(servers[1]))
++        servers[1] = 0;
++    if (message == 2 && dstate == D_SELECTING && valid_address(address)) {
++        offered = address;
++        server_id = identifier;
++        dstate = D_REQUESTING;
++        tries = 0;
++        log_msg("DHCP OFFER received");
++        return;
++    }
++    if (message == 5 && address && valid_address(address) && valid_mask(mask) &&
++        ((dstate == D_REQUESTING && address == offered && identifier == server_id) ||
++         (dstate == D_RENEWING && address == my_ip && identifier == server_id) ||
++         (dstate == D_REBINDING && address == my_ip))) {
++        int renewing = dstate == D_RENEWING;
++        if (!broadcast)
++            broadcast = address | ~mask;
++        if (lease_present && !seconds)
++            return;
++        snprintf(domain, sizeof(domain), "%s", parsed_domain);
++        server_id = identifier;
++        if (lease_configure(control, ifname, address, mask, router, broadcast, servers,
++                            lease_present ? seconds : 3600) < 0) {
++            dhcp_abort(control, ifname, "configuration failed");
++            return;
++        }
++        dstate = D_BOUND;
++        bound_ms = now_ms();
++        renew_ms = bound_ms + (uint64_t)lease_seconds * 500;
++        rebind_ms = bound_ms + (uint64_t)lease_seconds * 875;
++        expires_ms = bound_ms + (uint64_t)lease_seconds * 1000;
++        log_msg("DHCP ACK%s", renewing ? " (renewed)" : "");
++        return;
++    }
++    if (message == 6 &&
++        ((dstate == D_REQUESTING && identifier == server_id) ||
++         (dstate == D_RENEWING && identifier == server_id) || dstate == D_REBINDING)) {
++        dhcp_abort(control, ifname, "NAK received");
++    }
++}
++
++static int dhcp_send(int udp, const char *ifname, const uint8_t mac[6], int type)
++{
++    uint8_t packet[576] = { 0 }, *options;
++    packet[0] = 1;
++    packet[1] = 1;
++    packet[2] = 6;
++    memcpy(packet + 4, &xid, 4);
++    uint16_t elapsed = htons((uint16_t)((now_ms() - started_ms) / 1000));
++    memcpy(packet + 8, &elapsed, 2);
++    if (dstate == D_RENEWING || dstate == D_REBINDING)
++        memcpy(packet + 12, &my_ip, 4);
++    else
++        packet[10] = 0x80;
++    memcpy(packet + 28, mac, 6);
++    options = packet + 236;
++    *options++ = 99; *options++ = 130; *options++ = 83; *options++ = 99;
++    *options++ = 53; *options++ = 1; *options++ = (uint8_t)type;
++    *options++ = 61; *options++ = 7; *options++ = 1;
++    memcpy(options, mac, 6);
++    options += 6;
++    if (type == 3 && dstate == D_REQUESTING) {
++        *options++ = 50; *options++ = 4;
++        memcpy(options, &offered, 4);
++        options += 4;
++        *options++ = 54; *options++ = 4;
++        memcpy(options, &server_id, 4);
++        options += 4;
++    }
++    *options++ = 12; *options++ = 6;
++    memcpy(options, "iPhone", 6);
++    options += 6;
++    *options++ = 55; *options++ = 8;
++    *options++ = 1; *options++ = 3; *options++ = 6; *options++ = 15;
++    *options++ = 28; *options++ = 51; *options++ = 54; *options++ = 119;
++    *options++ = 255;
++    struct sockaddr_in destination;
++    memset(&destination, 0, sizeof(destination));
++    destination.sin_len = sizeof(destination);
++    destination.sin_family = AF_INET;
++    destination.sin_port = htons(67);
++    destination.sin_addr.s_addr = dstate == D_RENEWING && server_id ? server_id : htonl(INADDR_BROADCAST);
++    sent_ms = now_ms();
++    if (sendto(udp, packet, 300, 0, (struct sockaddr *)&destination, sizeof(destination)) < 0) {
++        log_msg("DHCP send: %s", strerror(errno));
++        return -1;
++    }
++    log_msg("DHCP %s sent on %s", type == 1 ? "DISCOVER" : "REQUEST", ifname);
++    return 0;
++}
++
++static void dhcp_start(int udp, const char *ifname, const uint8_t mac[6])
++{
++    arc4random_buf(&xid, sizeof(xid));
++    dstate = D_SELECTING;
++    tries = 0;
++    started_ms = now_ms();
++    dhcp_send(udp, ifname, mac, 1);
++}
++
++static unsigned retry_ms(unsigned attempt)
++{
++    return 2000u << (attempt < 4 ? attempt : 4);
++}
++
++static void dhcp_timer(int udp, const char *ifname, const uint8_t mac[6], uint64_t now)
++{
++    if ((dstate == D_SELECTING || dstate == D_REQUESTING) && now - sent_ms >= retry_ms(tries)) {
++        if (++tries > 6) {
++            dhcp_abort(control_fd, ifname, "timed out");
++            return;
++        }
++        dhcp_send(udp, ifname, mac, dstate == D_SELECTING ? 1 : 3);
++        return;
++    }
++    if (dstate == D_BOUND && now >= expires_ms) {
++        dhcp_abort(control_fd, ifname, "lease expired");
++        return;
++    }
++    if (dstate == D_BOUND && now >= rebind_ms) {
++        dstate = D_REBINDING;
++        tries = 0;
++        dhcp_send(udp, ifname, mac, 3);
++        return;
++    }
++    if (dstate == D_BOUND && now >= renew_ms) {
++        dstate = D_RENEWING;
++        tries = 0;
++        dhcp_send(udp, ifname, mac, 3);
++        return;
++    }
++    if ((dstate == D_RENEWING || dstate == D_REBINDING) && now - sent_ms >= retry_ms(tries)) {
++        if (dstate == D_RENEWING && now >= rebind_ms) {
++            dstate = D_REBINDING;
++            tries = 0;
++        }
++        if (tries < 5)
++            tries++;
++        dhcp_send(udp, ifname, mac, 3);
++    }
++}
++
++static void dhcp_session(const char *ifname)
++{
++    while (!stopping && getppid() == parent_pid) {
++        unsigned interface_index = if_nametoindex(ifname);
++        if (!interface_index) {
++            usleep(500000);
++            continue;
++        }
++        control_fd = socket(AF_INET, SOCK_DGRAM, 0);
++        udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++        if (control_fd < 0 || udp_fd < 0) {
++            log_msg("socket: %s", strerror(errno));
++            if (control_fd >= 0)
++                close(control_fd);
++            if (udp_fd >= 0)
++                close(udp_fd);
++            control_fd = udp_fd = -1;
++            usleep(1000000);
++            continue;
++        }
++        if (close_on_exec(control_fd) < 0 || close_on_exec(udp_fd) < 0) {
++            log_msg("FD_CLOEXEC: %s", strerror(errno));
++            close(control_fd);
++            close(udp_fd);
++            control_fd = udp_fd = -1;
++            continue;
++        }
++        int one = 1;
++        struct sockaddr_in local;
++        memset(&local, 0, sizeof(local));
++        local.sin_len = sizeof(local);
++        local.sin_family = AF_INET;
++        local.sin_port = htons(68);
++        local.sin_addr.s_addr = htonl(INADDR_ANY);
++        if (setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0 ||
++            setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one)) < 0 ||
++            setsockopt(udp_fd, IPPROTO_IP, IP_BOUND_IF, &interface_index, sizeof(interface_index)) < 0 ||
++            bind(udp_fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
++            log_msg("bind DHCP to %s: %s", ifname, strerror(errno));
++            close(control_fd);
++            close(udp_fd);
++            control_fd = udp_fd = -1;
++            usleep(1000000);
++            continue;
++        }
++        int flags = fcntl(udp_fd, F_GETFL);
++        if (flags >= 0)
++            fcntl(udp_fd, F_SETFL, flags | O_NONBLOCK);
++        signal(SIGCHLD, on_chld);
++        uint8_t mac[6] = { 0 };
++        struct ifreq request;
++        memset(&request, 0, sizeof(request));
++        snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
++        if (ioctl(control_fd, SIOCGIFLLADDR, &request) == 0) {
++            struct sockaddr_dl *link = (struct sockaddr_dl *)&request.ifr_addr;
++            if (link->sdl_alen == 6)
++                memcpy(mac, LLADDR(link), 6);
++        }
++        if (!mac[0] && !mac[1] && !mac[2] && !mac[3] && !mac[4] && !mac[5]) {
++            log_msg("%s has no Ethernet address", ifname);
++            close(control_fd);
++            close(udp_fd);
++            control_fd = udp_fd = -1;
++            usleep(1000000);
++            continue;
++        }
++        log_msg("waiting for %s link", ifname);
++        dstate = D_IDLE;
++        next_start_ms = 0;
++        while (!stopping && getppid() == parent_pid && if_nametoindex(ifname) == interface_index) {
++            usleep(100000);
++            while (waitpid(-1, NULL, WNOHANG) > 0)
++                ;
++            uint64_t now = now_ms();
++            int active = link_active(control_fd, ifname);
++            if (active < 0)
++                continue;
++            if (!active) {
++                if (dstate != D_IDLE || my_ip || bootstrap_ip)
++                    lease_release(control_fd, ifname);
++                dstate = D_IDLE;
++                next_start_ms = now + 1000;
++                continue;
++            }
++            if (dstate == D_IDLE) {
++                if (now >= next_start_ms) {
++                    if (bootstrap_prepare(control_fd, ifname, mac) < 0) {
++                        next_start_ms = now + 2000;
++                        continue;
++                    }
++                    dhcp_start(udp_fd, ifname, mac);
++                }
++                continue;
++            }
++            dhcp_timer(udp_fd, ifname, mac, now);
++            for (int count = 0; count < 8; count++) {
++                uint8_t packet[576];
++                struct sockaddr_in peer;
++                socklen_t peer_length = sizeof(peer);
++                ssize_t length = recvfrom(udp_fd, packet, sizeof(packet), 0,
++                                          (struct sockaddr *)&peer, &peer_length);
++                if (length <= 0)
++                    break;
++                if (peer.sin_port == htons(67))
++                    dhcp_receive(control_fd, ifname, mac, packet, (size_t)length);
++            }
++        }
++        lease_release(control_fd, ifname);
++        close(control_fd);
++        close(udp_fd);
++        control_fd = udp_fd = -1;
++        if (!stopping && getppid() == parent_pid)
++            log_msg("%s changed; reopening DHCP session", ifname);
++    }
++}
++
++int l3dhcp_main(int argc, char **argv)
++{
++    if (argc != 1) {
++        fprintf(stderr, "usage: wland l3dhcp IFNAME\n");
++        return 2;
++    }
++    parent_pid = getppid();
++    signal(SIGTERM, on_stop);
++    signal(SIGINT, on_stop);
++    setvbuf(stdout, NULL, _IONBF, 0);
++    dhcp_session(argv[0]);
++    return 0;
++}
+diff --git a/phone/wifi/l3dhcp.h b/phone/wifi/l3dhcp.h
+new file mode 100755
+index 0000000..da98b77
+--- /dev/null
++++ b/phone/wifi/l3dhcp.h
+@@ -0,0 +1,4 @@
++#ifndef L3DHCP_H
++#define L3DHCP_H
++int l3dhcp_main(int argc, char **argv);
++#endif
+diff --git a/phone/wifi/wland.c b/phone/wifi/wland.c
+index 8ea8d4b..9bfafad 100755
+--- a/phone/wifi/wland.c
++++ b/phone/wifi/wland.c
+@@ -25,8 +25,10 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include <signal.h>
++#include <spawn.h>
+ #include <sys/sysctl.h>
+ #include <sys/time.h>
++#include <sys/wait.h>
+ #include "pmem.h"
+ #include "smem.h"
+ #include "link.h"
+@@ -37,6 +39,9 @@
+ #include "radio.h"
+ #include "ipnet.h"
+ #include "bridge.h"
++#include "l3dhcp.h"
++
++extern char **environ;
+ #include "cell.h"
+ 
+ /* cmd-db aux levels (as in the GPU's arc votes) */
+@@ -657,13 +662,92 @@ static void join_poll(void)
+ 	asked = 1;
+ }
+ 
+-static volatile sig_atomic_t drop_asked;
++static volatile sig_atomic_t drop_asked, stopping;
++static pid_t l3_pid;
++static uint64_t l3_restart_ms;
+ 
+ static void on_usr1(int sig)
+ {
++	(void)sig;
+ 	drop_asked = 1;
+ }
+ 
++static void on_term(int sig)
++{
++	(void)sig;
++	stopping = 1;
++}
++
++static void on_chld(int sig)
++{
++	(void)sig;
++}
++
++static void l3_start(void)
++{
++	const char *setting = getenv("WLAND_EN0_DHCP");
++	if (stopping || (setting && !strcmp(setting, "0")) || l3_pid || !bridge_active())
++		return;
++	char *argv[] = { "wland", "l3dhcp", "en0", NULL };
++	posix_spawnattr_t attributes;
++	int error = posix_spawnattr_init(&attributes);
++	if (error) {
++		printf("l3: spawn attributes: %s\n", strerror(error));
++		return;
++	}
++#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
++	error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
++	if (error) {
++		posix_spawnattr_destroy(&attributes);
++		printf("l3: spawn flags: %s\n", strerror(error));
++		return;
++	}
++#endif
++	pid_t pid;
++	error = posix_spawn(&pid, "/var/local/bin/wland", NULL, &attributes, argv, environ);
++	posix_spawnattr_destroy(&attributes);
++	if (error) {
++		printf("l3: cannot start DHCP client: %s\n", strerror(error));
++		l3_restart_ms = link_ms() + 5000;
++		return;
++	}
++	l3_pid = pid;
++	printf("l3: en0 DHCP client started (pid %d)\n", pid);
++}
++
++static void l3_poll(void)
++{
++	int status;
++	pid_t pid;
++	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
++		if (pid != l3_pid)
++			continue;
++		printf("l3: DHCP client exited (status %#x); restarting\n", status);
++		l3_pid = 0;
++		l3_restart_ms = link_ms() + 2000;
++	}
++	if (!l3_pid && link_ms() >= l3_restart_ms)
++		l3_start();
++}
++
++static void l3_stop(void)
++{
++	if (!l3_pid)
++		return;
++	kill(l3_pid, SIGTERM);
++	for (unsigned attempt = 0; attempt < 100; attempt++) {
++		int status;
++		if (waitpid(l3_pid, &status, WNOHANG) == l3_pid) {
++			l3_pid = 0;
++			return;
++		}
++		usleep(20000);
++	}
++	kill(l3_pid, SIGKILL);
++	waitpid(l3_pid, NULL, 0);
++	l3_pid = 0;
++}
++
+ static void net_idle(void)
+ {
+ 	if (drop_asked) {
+@@ -674,6 +758,7 @@ static void net_idle(void)
+ 	radio_poll();
+ 	ipnet_poll();
+ 	bridge_poll();
++	l3_poll();
+ 	join_poll();
+ 	cell_poll();
+ }
+@@ -684,7 +769,9 @@ static int net(unsigned secs)
+ 		verbose_link = atoi(getenv("WLAND_VERBOSE"));
+ 	link_idle = net_idle;
+ 	signal(SIGUSR1, on_usr1);
+-	signal(SIGCHLD, SIG_IGN);	/* netsvc children (ipnet.c) reap themselves */
++	signal(SIGTERM, on_term);
++	signal(SIGINT, on_term);
++	signal(SIGCHLD, on_chld);
+ 	if (link_up(net_cb, 5000))
+ 		return -1;
+ 	if (rmtfs_init())
+@@ -694,7 +781,7 @@ static int net(unsigned secs)
+ 	read_conf();
+ 	cell_init();
+ 	uint64_t end = link_ms() + (uint64_t)secs * 1000, stats = link_ms() + 30000;
+-	while (!secs || link_ms() < end) {
++	while (!stopping && (!secs || link_ms() < end)) {
+ 		link_poll(100);
+ 		if (link_ms() > stats) {
+ 			radio_stats();
+@@ -706,12 +793,20 @@ static int net(unsigned secs)
+ 			printf("net: WLFW bring-up failed\n");
+ 		} else if (!getenv("WLAND_NO_RADIO")) {
+ 			delay_ms(100);	/* topaz: only after mission mode; before it a CE access hangs the bus */
+-			if (radio_start())
++			if (radio_start()) {
+ 				printf("net: radio start failed\n");
+-			else if (bridge_open() != 0 && conf_ssid[0] && ipnet_init())
++			} else if (getenv("WLAND_FORCE_UTUN")) {
++				printf("net: WLAND_FORCE_UTUN: using ipnet/utun instead of en0\n");
++				if (conf_ssid[0] && ipnet_init())
++					printf("net: no utun: joining without IP\n");
++			} else if (bridge_open() == 0) {
++				l3_start();
++			} else if (conf_ssid[0] && ipnet_init()) {
+ 				printf("net: no utun: joining without IP\n");
++			}
+ 		}
+ 	}
++	l3_stop();
+ 	radio_summary();
+ 	radio_stats();
+ 	return 0;
+@@ -808,6 +903,8 @@ int main(int argc, char **argv)
+ 		return 2;
+ 	}
+ 	setvbuf(stdout, NULL, _IONBF, 0);	/* a stalled bus access must not swallow the output */
++	if (argc > 1 && !strcmp(argv[1], "l3dhcp"))
++		return l3dhcp_main(argc - 2, argv + 2);
+ 	pm_init();
+ 	if (smem_init())
+ 		return 1;
