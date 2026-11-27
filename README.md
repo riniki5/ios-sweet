@@ -1,37 +1,39 @@
 # ios-sweet — iOS 16 on the Xiaomi Mi Note 10 Lite (`toco`)
 
-**Apple's iOS 16 running on a Xiaomi Mi Note 10 Lite.**
+**Experimental XNU/iOS bring-up for the Xiaomi Mi Note 10 Lite.**
 
-This tree ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Mi Note 10 Lite (`toco`, Qualcomm SM7150G / Snapdragon 730G, 6.47" 1080×2340). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
+This tree ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Mi Note 10 Lite (`toco`, Qualcomm SM7150G / Snapdragon 730G, 6.47" 1080×2340). It runs the iPhone X's iOS 16.7.16 (20H392) userland with project-specific bring-up modifications: launchd, system daemons, backboardd, SpringBoard and the stock apps. It is not an unmodified or daily-driver iOS installation.
 
-It is a fork of [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet), the Redmi Note 10 Pro (`sweet`) port, and keeps its patch series. Patch 0082 adds the `toco` hardware: the 1080×2340 panel, the Focaltech FTM5 touch controller and its PM6150L LDO6 rail vote in the RPMh driver. The same kernel, shim and iOS root boot both phones.
+The project descends from [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet) and [DC28088/ios-sweet](https://github.com/DC28088/ios-sweet), the Redmi Note 10 Pro (`sweet`) port. Patch 0082 adds the `toco` hardware: the 1080×2340 panel, the Focaltech FTM5 touch controller and its PM6150L LDO6 rail vote in the RPMh driver.
 
-As of **2026-11-26** the phone boots to iOS, and the touchscreen and hardware buttons work. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup, and a CP fence have completed on the toco device. The strict patch series now defaults to the proven 267 MHz corner and publishes NativeAdreno only after clock and render-profile qualification; full kernel CI and on-device rendering are still pending, so the display may remain on the Apple loading logo while iOS starts.
+Active development is on [`codex/springboard-gpu-access`](https://github.com/riniki5/ios-sweet/tree/codex/springboard-gpu-access). The fork's default `main` branch retains the upstream `sweet` port; its hardware and feature claims are not `toco` results.
 
-> Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
+As of **2026-11-27**, known-good CPU-rendered configurations have reached the iOS lock/home screen with working touch and hardware buttons. WCN3990 scanning, WPA2 authentication and association work through the kernel `en0` bridge. The Layer-3 DHCP helper has passed arm64 iOS CI, but the new binary is not installed on the phone yet, so IPv4 routing, DNS and Safari web access remain unverified. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup and a CP fence have completed on toco; a successful native-Metal UI draw and stable 60 FPS have not been confirmed, and GPU diagnostic boots may still stall at the Apple logo.
 
-## What works
+> Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into `userdata` and **erases Android's user data**. Never flash `boot`, `dtbo` or `recovery`; test kernels only with `fastboot boot shim-boot.img`.
+
+## Verified or implemented
 
 | Area | State |
 | --- | --- |
-| Boot | Stock Xiaomi bootloader → `fastboot boot` of our shim → XNU → lock/home screen in about 90 seconds. Nothing is flashed to the boot partitions |
-| CPU | All eight cores via PSCI (`cpus=8`; patch 0078), 16K pages, GICv3 interrupts, timers |
-| Memory | About 3.95 GiB of the upper DDR bank |
+| Boot | Stock Xiaomi bootloader → temporary `fastboot boot` of our shim → XNU → lock/home screen in about 90 seconds in known-good CPU-rendered configurations. Current GPU diagnostics can stall before the UI |
+| CPU | Eight-core arm64 configuration (`cpus=8`; patch 0078), 16K pages, GICv3 interrupts and timers; eight-core boot has been tested, but sustained stability is not established |
+| Memory | About 3.95 GiB from the upper DDR bank, above Qualcomm's protected carve-outs |
 | Storage | Own UFS host driver; the iOS root is a journaled HFS+ volume in `userdata`, read/write |
-| iOS userland | Real iPhone X 16.7.16 root filesystem and shared cache; launchd and the system daemons run |
-| Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services; CoreAnimation renders in software; frames are copied into the bootloader's framebuffer. Presented to iOS as an iPhone X panel (1125×2436). Optional render scale (`sweetfb_w`/`sweetfb_h`) rasterises fewer pixels and stretches them to the panel |
-| GUI | backboardd, SpringBoard, lock screen, home screen; the home gesture and app switcher work |
-| GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; UI rendering still needs qualification |
+| iOS userland | iPhone X 16.7.16 root filesystem and shared cache with bring-up modifications; launchd and the system daemons run |
+| Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services; CoreAnimation renders in software and frames are copied into the bootloader's framebuffer. The physical panel is 1080×2340; the current default logical framebuffer is 828×1792 and is stretched to the panel |
+| GUI | backboardd, SpringBoard, lock screen and home screen; the home gesture and app switcher work on the CPU path |
+| GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; native-Metal UI rendering still needs qualification |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
-| Buttons | Power, volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
-| Wi-Fi link | WCN3990 firmware, scans, WPA2 authentication and association work through the kernel `en0` bridge; Layer-3 DHCP/routing/DNS validation is still pending |
-| Battery | IOPMPowerSource service (static 100 %, charging icon) |
-| Device identity | iPhone X (`iPhone10,3` / `D22AP`): no Home button, gesture UI |
-| Activation | Native "Hactivation" path of mobileactivationd, chosen through device-tree security status. No Apple servers involved |
+| Buttons | Power and volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
+| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. Link stability and Layer 3 still need validation |
+| Battery | Bring-up IOPMPowerSource service with a static 100% reading and charging icon; not real fuel-gauge telemetry |
+| Device identity | Emulated iPhone X identity (`iPhone10,3` / `D22AP`) for userland compatibility and gesture UI; the physical device remains a Mi Note 10 Lite |
+| Activation | Bring-up activation path in mobileactivationd, selected through device-tree security status; not a genuine Apple activation |
 
 ## What does not work (yet)
 
-- **Wi-Fi associates but has no validated Layer 3 yet.** The installed `0001`–`0007` build scans and joins on `en0`, but `configd` never creates an IPv4 service, default route, or resolver configuration, so Safari cannot load pages. Patch `0008` adds an `en0`-bound DHCP client to `wland`; it passes host syntax, protocol/state and sanitizer checks, but still needs an iOS CI build, reinstall and on-device DHCP/Safari validation. Bluetooth, cellular, audio, camera, sensors, GPS and SEP / Face ID are still unavailable.
+- **Wi-Fi associates but has no validated Layer 3 yet.** The installed `0001`–`0007` build scans and joins on `en0`, but does not configure an IPv4 service, default route or resolver, so Safari cannot load pages. Patch `0008` adds a supervised `en0` DHCP client and passed [arm64 iOS CI run 45959320701](https://github.com/riniki5/ios-sweet/actions/runs/45959320701); its artifact is verified but still needs a recovery-file-service reinstall and on-device DHCP/routing/DNS/Safari validation. Bluetooth, cellular, camera, GPS and SEP / Face ID are unavailable on toco; do not carry over the `sweet` branch's audio, haptics, sensor or SIM claims.
 - **GPU UI rendering is not yet qualified.** The strict CI kernel and matching native Metal bundle are built and verified, but the first temporary boot produced no USB telemetry and the phone is no longer in fastboot. A newer stage-0 diagnostic adds `GETLOG` and disables the GPU audit for the safest log-recovery boot; boot it with `SWEET_LOG_PERSIST=0` to retrieve the preceding boot's log. Stage 1 can also disable the unconditional DDR vote and BO-pool reservation. NativeAdreno is published only after strict clock and render-profile checks; a successful on-screen Metal draw and responsive UI have not yet been confirmed. Raw MMIO and secure-monitor transactions remain outside same-CPU timeout protection, so keep the GPU opt-in and preserve the working touch path while validating the userspace bundle.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty. Several apps show a black window (Phone, Photos, Messages) because they need hardware we do not have.
 - **Slow boot:** about 90 seconds on the Apple logo, against a few seconds on a real iPhone.
