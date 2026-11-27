@@ -56,16 +56,15 @@ index 8f22298..27e17d2 100755
  		return -1;
 diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
 new file mode 100755
-index 0000000..a6aa684
+index 0000000..273b17e
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,895 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
 +#include <mach/mach_time.h>
 +#include <net/if.h>
-+#include <net/if_media.h>
 +#include <netinet/in.h>
 +#include <signal.h>
 +#include <spawn.h>
@@ -82,6 +81,23 @@ index 0000000..a6aa684
 +
 +#ifndef IP_BOUND_IF
 +#define IP_BOUND_IF 25
++#endif
++
++#define L3_IFM_AVALID 0x00000001
++#define L3_IFM_ACTIVE 0x00000002
++#pragma pack(push, 4)
++struct l3_ifmediareq {
++    char ifm_name[IFNAMSIZ];
++    int ifm_current;
++    int ifm_mask;
++    int ifm_status;
++    int ifm_active;
++    int ifm_count;
++    int *ifm_ulist;
++};
++#pragma pack(pop)
++#ifndef SIOCGIFMEDIA
++#define SIOCGIFMEDIA _IOWR('i', 56, struct l3_ifmediareq)
 +#endif
 +
 +extern char **environ;
@@ -186,13 +202,13 @@ index 0000000..a6aa684
 +
 +static int link_ready(int control, const char *ifname)
 +{
-+    struct ifmediareq media;
++    struct l3_ifmediareq media;
 +    memset(&media, 0, sizeof(media));
 +    snprintf(media.ifm_name, sizeof(media.ifm_name), "%s", ifname);
 +    if (ioctl(control, SIOCGIFMEDIA, &media) < 0)
 +        return -1;
-+    return (media.ifm_status & (IFM_AVALID | IFM_ACTIVE)) ==
-+           (IFM_AVALID | IFM_ACTIVE);
++    return (media.ifm_status & (L3_IFM_AVALID | L3_IFM_ACTIVE)) ==
++           (L3_IFM_AVALID | L3_IFM_ACTIVE);
 +}
 +
 +static uint32_t primary_address(int control, const char *ifname)
