@@ -170,7 +170,7 @@ interface from Settings on toco. Boot-stamp write failures refuse startup.
 Launchd retries only failures from before modem PAS; it never automatically
 boots the modem twice in one boot.
 
-With patch `0008`, `wland` supervises `wland l3dhcp en0` after opening `/dev/wlan`.
+With patch `0008`, `wland` supervises the `l3dhcp` helper after opening `/dev/wlan`.
 The helper waits for asynchronous `en0` creation and interface-up state, uses a
 temporary IPv4 link-local source for the first DHCP broadcast, then replaces it
 with the leased address. It handles renewal, rebinding and expiry, rolls back

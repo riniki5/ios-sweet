@@ -56,10 +56,10 @@ index 8f22298..27e17d2 100755
  		return -1;
 diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
 new file mode 100755
-index 0000000..86e88aa
+index 0000000..c1eb908
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,838 @@
+@@ -0,0 +1,847 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
@@ -769,7 +769,7 @@ index 0000000..86e88aa
 +    }
 +}
 +
-+static void dhcp_session(const char *ifname)
++static void dhcp_session(const char *ifname, const uint8_t mac[6])
 +{
 +    while (!stopping && getppid() == parent_pid) {
 +        unsigned interface_index = if_nametoindex(ifname);
@@ -818,23 +818,6 @@ index 0000000..86e88aa
 +        if (flags >= 0)
 +            fcntl(udp_fd, F_SETFL, flags | O_NONBLOCK);
 +        signal(SIGCHLD, on_chld);
-+        uint8_t mac[6] = { 0 };
-+        struct ifreq request;
-+        memset(&request, 0, sizeof(request));
-+        snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
-+        if (ioctl(control_fd, SIOCGIFLLADDR, &request) == 0) {
-+            struct sockaddr_dl *link = (struct sockaddr_dl *)&request.ifr_addr;
-+            if (link->sdl_alen == 6)
-+                memcpy(mac, LLADDR(link), 6);
-+        }
-+        if (!mac[0] && !mac[1] && !mac[2] && !mac[3] && !mac[4] && !mac[5]) {
-+            log_msg("%s has no Ethernet address", ifname);
-+            close(control_fd);
-+            close(udp_fd);
-+            control_fd = udp_fd = -1;
-+            usleep(1000000);
-+            continue;
-+        }
 +        log_msg("waiting for %s link", ifname);
 +        dstate = D_IDLE;
 +        next_start_ms = 0;
@@ -885,17 +868,43 @@ index 0000000..86e88aa
 +    }
 +}
 +
++static int hex_value(char c)
++{
++    if (c >= '0' && c <= '9')
++        return c - '0';
++    if (c >= 'a' && c <= 'f')
++        return c - 'a' + 10;
++    if (c >= 'A' && c <= 'F')
++        return c - 'A' + 10;
++    return -1;
++}
++
++static int parse_mac(const char *text, uint8_t mac[6])
++{
++    if (strlen(text) != 12)
++        return -1;
++    for (unsigned i = 0; i < 6; i++) {
++        int high = hex_value(text[i * 2]);
++        int low = hex_value(text[i * 2 + 1]);
++        if (high < 0 || low < 0)
++            return -1;
++        mac[i] = (uint8_t)((high << 4) | low);
++    }
++    return 0;
++}
++
 +int l3dhcp_main(int argc, char **argv)
 +{
-+    if (argc != 1) {
-+        fprintf(stderr, "usage: wland l3dhcp IFNAME\n");
++    uint8_t mac[6];
++    if (argc != 2 || parse_mac(argv[1], mac) < 0) {
++        fprintf(stderr, "usage: wland l3dhcp IFNAME MAC\n");
 +        return 2;
 +    }
 +    parent_pid = getppid();
 +    signal(SIGTERM, on_stop);
 +    signal(SIGINT, on_stop);
 +    setvbuf(stdout, NULL, _IONBF, 0);
-+    dhcp_session(argv[0]);
++    dhcp_session(argv[0], mac);
 +    return 0;
 +}
 diff --git a/phone/wifi/l3dhcp.h b/phone/wifi/l3dhcp.h
@@ -909,7 +918,7 @@ index 0000000..da98b77
 +int l3dhcp_main(int argc, char **argv);
 +#endif
 diff --git a/phone/wifi/wland.c b/phone/wifi/wland.c
-index 8ea8d4b..9bfafad 100755
+index 8ea8d4b..b4df821 100755
 --- a/phone/wifi/wland.c
 +++ b/phone/wifi/wland.c
 @@ -25,8 +25,10 @@
@@ -933,7 +942,7 @@ index 8ea8d4b..9bfafad 100755
  #include "cell.h"
  
  /* cmd-db aux levels (as in the GPU's arc votes) */
-@@ -657,13 +662,92 @@ static void join_poll(void)
+@@ -657,13 +662,95 @@ static void join_poll(void)
  	asked = 1;
  }
  
@@ -964,7 +973,10 @@ index 8ea8d4b..9bfafad 100755
 +	const char *setting = getenv("WLAND_EN0_DHCP");
 +	if (stopping || (setting && !strcmp(setting, "0")) || l3_pid || !bridge_active())
 +		return;
-+	char *argv[] = { "wland", "l3dhcp", "en0", NULL };
++	char mac_text[13];
++	snprintf(mac_text, sizeof(mac_text), "%02x%02x%02x%02x%02x%02x",
++	         radio_mac[0], radio_mac[1], radio_mac[2], radio_mac[3], radio_mac[4], radio_mac[5]);
++	char *argv[] = { "wland", "l3dhcp", "en0", mac_text, NULL };
 +	posix_spawnattr_t attributes;
 +	int error = posix_spawnattr_init(&attributes);
 +	if (error) {
@@ -1027,7 +1039,7 @@ index 8ea8d4b..9bfafad 100755
  static void net_idle(void)
  {
  	if (drop_asked) {
-@@ -674,6 +758,7 @@ static void net_idle(void)
+@@ -674,6 +761,7 @@ static void net_idle(void)
  	radio_poll();
  	ipnet_poll();
  	bridge_poll();
@@ -1035,7 +1047,7 @@ index 8ea8d4b..9bfafad 100755
  	join_poll();
  	cell_poll();
  }
-@@ -684,7 +769,9 @@ static int net(unsigned secs)
+@@ -684,7 +772,9 @@ static int net(unsigned secs)
  		verbose_link = atoi(getenv("WLAND_VERBOSE"));
  	link_idle = net_idle;
  	signal(SIGUSR1, on_usr1);
@@ -1046,7 +1058,7 @@ index 8ea8d4b..9bfafad 100755
  	if (link_up(net_cb, 5000))
  		return -1;
  	if (rmtfs_init())
-@@ -694,7 +781,7 @@ static int net(unsigned secs)
+@@ -694,7 +784,7 @@ static int net(unsigned secs)
  	read_conf();
  	cell_init();
  	uint64_t end = link_ms() + (uint64_t)secs * 1000, stats = link_ms() + 30000;
@@ -1055,7 +1067,7 @@ index 8ea8d4b..9bfafad 100755
  		link_poll(100);
  		if (link_ms() > stats) {
  			radio_stats();
-@@ -706,12 +793,20 @@ static int net(unsigned secs)
+@@ -706,12 +796,20 @@ static int net(unsigned secs)
  			printf("net: WLFW bring-up failed\n");
  		} else if (!getenv("WLAND_NO_RADIO")) {
  			delay_ms(100);	/* topaz: only after mission mode; before it a CE access hangs the bus */
@@ -1078,7 +1090,7 @@ index 8ea8d4b..9bfafad 100755
  	radio_summary();
  	radio_stats();
  	return 0;
-@@ -808,6 +903,8 @@ int main(int argc, char **argv)
+@@ -808,6 +906,8 @@ int main(int argc, char **argv)
  		return 2;
  	}
  	setvbuf(stdout, NULL, _IONBF, 0);	/* a stalled bus access must not swallow the output */
