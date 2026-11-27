@@ -171,7 +171,7 @@ Launchd retries only failures from before modem PAS; it never automatically
 boots the modem twice in one boot.
 
 With patch `0008`, `wland` supervises `wland l3dhcp en0` after opening `/dev/wlan`.
-The helper waits for asynchronous `en0` creation and active media, uses a
+The helper waits for asynchronous `en0` creation and interface-up state, uses a
 temporary IPv4 link-local source for the first DHCP broadcast, then replaces it
 with the leased address. It handles renewal, rebinding and expiry, rolls back
 failed address/route changes, and cleans up on link loss or shutdown. DHCP DNS is

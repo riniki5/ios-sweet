@@ -56,17 +56,15 @@ index 8f22298..27e17d2 100755
  		return -1;
 diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
 new file mode 100755
-index 0000000..ba4f7a0
+index 0000000..86e88aa
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,850 @@
+@@ -0,0 +1,838 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
 +#include <mach/mach_time.h>
 +#include <net/if.h>
-+#include <net/if_dl.h>
-+#include <net/if_media.h>
 +#include <netinet/in.h>
 +#include <signal.h>
 +#include <spawn.h>
@@ -104,7 +102,6 @@ index 0000000..ba4f7a0
 +static char domain[256], my_domain[256];
 +static int resolv_owned;
 +static int control_fd = -1, udp_fd = -1;
-+static uint64_t last_media_error_ms;
 +
 +static uint64_t now_ms(void)
 +{
@@ -186,23 +183,14 @@ index 0000000..ba4f7a0
 +    return 0;
 +}
 +
-+static int link_active(int control, const char *ifname)
++static int link_ready(int control, const char *ifname)
 +{
-+    struct ifmediareq request;
-+    int media[1] = { 0 };
++    struct ifreq request;
 +    memset(&request, 0, sizeof(request));
-+    snprintf(request.ifm_name, sizeof(request.ifm_name), "%s", ifname);
-+    request.ifm_count = 1;
-+    request.ifm_ulist = media;
-+    if (ioctl(control, SIOCGIFMEDIA, &request) < 0) {
-+        uint64_t now = now_ms();
-+        if (now - last_media_error_ms > 5000) {
-+            log_msg("%s SIOCGIFMEDIA: %s", ifname, strerror(errno));
-+            last_media_error_ms = now;
-+        }
++    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
++    if (ioctl(control, SIOCGIFFLAGS, &request) < 0)
 +        return -1;
-+    }
-+    return (request.ifm_status & IFM_AVALID) && (request.ifm_status & IFM_ACTIVE);
++    return (request.ifr_flags & IFF_UP) != 0;
 +}
 +
 +static uint32_t primary_address(int control, const char *ifname)
@@ -855,7 +843,7 @@ index 0000000..ba4f7a0
 +            while (waitpid(-1, NULL, WNOHANG) > 0)
 +                ;
 +            uint64_t now = now_ms();
-+            int active = link_active(control_fd, ifname);
++            int active = link_ready(control_fd, ifname);
 +            if (active < 0)
 +                continue;
 +            if (!active) {
