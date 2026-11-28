@@ -26,7 +26,7 @@ As of **2026-11-28**, known-good CPU-rendered configurations have reached the iO
 | GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; native-Metal UI rendering still needs qualification |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power and volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
-| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. The host-order IPv4-length fix passed CI run `46130693764` and booted on hardware; the `en0` trace then captured repeated DHCP OFFER arrivals, but no lease, route or resolver followed. Bounded receive/reject diagnostics are being added to locate the remaining userspace/kernel delivery blocker |
+| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. The host-order IPv4-length fix passed CI run `46130693764` and booted on hardware; the `en0` trace then captured repeated DHCP OFFER arrivals, but no lease, route or resolver followed. Diagnostic CI run `46133130346` passed, and the XNU audit found that source substitution invalidates the raw packet's nonzero UDP checksum; the follow-up uses a valid zero checksum and awaits CI |
 | Battery | Bring-up IOPMPowerSource service with a static 100% reading and charging icon; not real fuel-gauge telemetry |
 | Device identity | Emulated iPhone X identity (`iPhone10,3` / `D22AP`) for userland compatibility and gesture UI; the physical device remains a Mi Note 10 Lite |
 | Activation | Bring-up activation path in mobileactivationd, selected through device-tree security status; not a genuine Apple activation |
@@ -218,13 +218,19 @@ readback-verified and has now temporary-booted. WCN3990 association and the
 from the router's DHCP server to `255.255.255.255:68`; no OFFER acceptance,
 REQUEST, ACK, lease, route or resolver publication followed. The fetched
 userspace log was an early partial snapshot, and the USB CDC endpoint then
-stalled, so the exact receive/parser failure is not yet known. A diagnostic
-build will log the first socket replies and bounded rejection reasons; it also
-accepts malformed optional domain names without discarding an otherwise valid
-lease and decodes RFC 3397 domain-search options. Reboot to fastboot and
-temporary-boot the network-trace image with the diagnostic binary installed,
-then compare ICMP to a public IP with name resolution and test both HTTP and
-HTTPS in Safari; TLS clock and certificate trust remain separate checks. The
+stalled, so the exact receive/parser failure is not yet known. Diagnostic CI
+run `46133130346` passed; its arm64 `wland` is 285,952 bytes with SHA-256
+`394c450961c2526612cc25fbc116935cf8fc12e545dbda5c685b5f2b47389a24`.
+It logs the first socket replies and bounded rejection reasons, accepts
+malformed optional domain names without discarding an otherwise valid lease,
+and decodes RFC 3397 domain-search options. A read-only XNU audit then proved
+that raw output substitutes the temporary interface address for source
+`0.0.0.0` without repairing the helper's UDP checksum. The follow-up leaves the
+IPv4 UDP checksum zero, which is valid and explicitly accepted by XNU, and
+extends the host test through that source substitution. Reboot to fastboot and
+temporary-boot the network-trace image with the follow-up diagnostic binary
+installed, then compare ICMP to a public IP with name resolution and test both
+HTTP and HTTPS in Safari; TLS clock and certificate trust remain separate checks. The
 USB file service has no command-execution primitive, so use the persisted
 `wland` log
 and Safari until a diagnostic shell is available.

@@ -56,10 +56,10 @@ index 9607cd7..8ca98ab 100644
  		return -1;
 diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
 new file mode 100755
-index 0000000..02d4c1f
+index 0000000..c07bb30
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,1052 @@
+@@ -0,0 +1,1046 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
@@ -810,14 +810,8 @@ index 0000000..02d4c1f
 +    uint32_t ip_sum = 0;
 +    checksum_add(&ip_sum, frame, 20);
 +    checksum_store(frame + 10, checksum_finish(ip_sum));
-+    uint32_t udp_sum = 0;
-+    checksum_add(&udp_sum, frame + 12, 8);
-+    const uint8_t pseudo_protocol[4] = { 0, 0, 0, IPPROTO_UDP };
-+    checksum_add(&udp_sum, pseudo_protocol, sizeof(pseudo_protocol));
-+    checksum_add(&udp_sum, frame + 20, 8);
-+    checksum_add(&udp_sum, frame + 28, 300);
-+    uint16_t udp_checksum = checksum_finish(udp_sum);
-+    checksum_store(frame + 26, udp_checksum ? udp_checksum : 0xffff);
++    /* XNU replaces a zero source without repairing a nonzero UDP checksum. */
++    frame[26] = frame[27] = 0;
 +
 +    if (sendto(raw, frame, sizeof(frame), 0, (const struct sockaddr *)destination,
 +               sizeof(*destination)) < 0) {
