@@ -1,5 +1,5 @@
 diff --git a/phone/tools/netsvc.m b/phone/tools/netsvc.m
-index d82a382..02b9579 100644
+index 362c745..ee48908 100644
 --- a/phone/tools/netsvc.m
 +++ b/phone/tools/netsvc.m
 @@ -4,7 +4,7 @@
@@ -31,7 +31,7 @@ index d82a382..02b9579 100644
  		SCDynamicStoreRef st = SCDynamicStoreCreate(NULL, CFSTR("netsvc"), NULL, NULL);
  		if (!st) {
 diff --git a/phone/wifi/bridge.c b/phone/wifi/bridge.c
-index 8f22298..27e17d2 100644
+index 9607cd7..8ca98ab 100644
 --- a/phone/wifi/bridge.c
 +++ b/phone/wifi/bridge.c
 @@ -1,8 +1,8 @@
@@ -56,10 +56,10 @@ index 8f22298..27e17d2 100644
  		return -1;
 diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
 new file mode 100755
-index 0000000..b66a256
+index 0000000..0d95624
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,978 @@
+@@ -0,0 +1,979 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
@@ -724,7 +724,8 @@ index 0000000..b66a256
 +    uint8_t frame[328];
 +    memset(frame, 0, sizeof(frame));
 +    frame[0] = 0x45;
-+    uint16_t total = htons(sizeof(frame));
++    /* XNU validates raw IPv4 lengths in host order, then converts before output. */
++    uint16_t total = (uint16_t)sizeof(frame);
 +    memcpy(frame + 2, &total, 2);
 +    uint16_t identifier;
 +    memcpy(&identifier, &xid, 2);
@@ -1039,7 +1040,7 @@ index 0000000..b66a256
 +    return 0;
 +}
 diff --git a/phone/wifi/l3dhcp.h b/phone/wifi/l3dhcp.h
-new file mode 100755
+new file mode 100644
 index 0000000..da98b77
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.h
@@ -1049,7 +1050,7 @@ index 0000000..da98b77
 +int l3dhcp_main(int argc, char **argv);
 +#endif
 diff --git a/phone/wifi/wland.c b/phone/wifi/wland.c
-index 8ea8d4b..13296f8 100644
+index 549fb0b..e6eb8b3 100644
 --- a/phone/wifi/wland.c
 +++ b/phone/wifi/wland.c
 @@ -25,8 +25,10 @@
