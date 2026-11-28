@@ -212,9 +212,10 @@ publication. The new raw sender passed host protocol, checksum, sanitizer and
 static-analysis checks, and CI run `46127351040` produced a strict-codesign-verified
 arm64 `wland` with SHA-256
 `adb049bd068b510c5a7aad1a1c54eaa842d8344e3866c865745583a4b65720c3`.
-`netsvc` is byte-identical to the installed binary. The current USB gadget does
-not answer the file service, so the verified `wland` is staged but not yet
-installed; no on-device OFFER exists. Then compare ICMP to a public IP with name
+`netsvc` is byte-identical to the installed binary. The phone's USB Ethernet
+gadget disappeared during a host-side reattach, and neither ADB nor fastboot is
+currently available, so the verified `wland` is staged but not yet installed;
+no on-device OFFER exists. Then compare ICMP to a public IP with name
 resolution and test both HTTP and HTTPS in Safari; TLS clock and certificate
 trust remain separate checks. The USB file service has no command-execution
 primitive, so use the persisted `wland` log and Safari until a diagnostic shell
