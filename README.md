@@ -8,7 +8,7 @@ The project descends from [dipa-studio/ios-sweet](https://github.com/dipa-studio
 
 Active development is on [`codex/springboard-gpu-access`](https://github.com/riniki5/ios-sweet/tree/codex/springboard-gpu-access). The fork's default `main` branch retains the upstream `sweet` port; its hardware and feature claims are not `toco` results.
 
-As of **2026-11-28**, known-good CPU-rendered configurations have reached the iOS lock/home screen with working touch and hardware buttons. WCN3990 scanning, WPA2 authentication and association work through the kernel `en0` bridge. Corrected `0008` artifact `46009265668` is installed and readback-verified on the phone; one reboot is still required before validating its DHCP helper, IPv4/DNS and Safari. The current Apple-logo spinner includes a PosterBoard first-time setup assertion; static tracing identifies a startup race that can populate its switcher configuration too early, and the compatibility patch is prepared but not yet installed. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup and a CP fence have completed on toco; a successful native-Metal UI draw and stable 60 FPS have not been confirmed, and GPU diagnostic boots may still stall at the Apple logo.
+As of **2026-11-28**, known-good CPU-rendered configurations have reached the iOS lock/home screen with working touch and hardware buttons. WCN3990 scanning, WPA2 authentication and association work through the kernel `en0` bridge. Corrected `0008` artifact `46009265668` is installed and readback-verified on the phone; its helper now runs and sent four DHCP DISCOVERs, but the old link-local source received no OFFER. A raw IPv4 sender using `0.0.0.0` has passed host validation and awaits an iOS CI build and hardware test. The current Apple-logo spinner includes a PosterBoard first-time setup assertion; static tracing identifies a startup race that can populate its switcher configuration too early, and the compatibility patch is prepared but not yet installed. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup and a CP fence have completed on toco; a successful native-Metal UI draw and stable 60 FPS have not been confirmed, and GPU diagnostic boots may still stall at the Apple logo.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into `userdata` and **erases Android's user data**. Never flash `boot`, `dtbo` or `recovery`; test kernels only with `fastboot boot shim-boot.img`.
 
@@ -26,14 +26,14 @@ As of **2026-11-28**, known-good CPU-rendered configurations have reached the iO
 | GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; native-Metal UI rendering still needs qualification |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power and volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
-| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. Corrected `0008` artifact `46009265668` is installed and readback-verified; DHCP/IPv4/DNS/Safari validation awaits a reboot |
+| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. Corrected `0008` artifact `46009265668` is installed and its helper now runs and sends DHCP DISCOVERs; no OFFER arrived from the old link-local source. A raw IPv4 sender using `0.0.0.0` is host-validated; its CI build and hardware validation are pending |
 | Battery | Bring-up IOPMPowerSource service with a static 100% reading and charging icon; not real fuel-gauge telemetry |
 | Device identity | Emulated iPhone X identity (`iPhone10,3` / `D22AP`) for userland compatibility and gesture UI; the physical device remains a Mi Note 10 Lite |
 | Activation | Bring-up activation path in mobileactivationd, selected through device-tree security status; not a genuine Apple activation |
 
 ## What does not work (yet)
 
-- **Wi-Fi associates but has no validated Layer 3 yet.** Installed `0008` artifact `45987546268` reads back correctly and reaches association and `en0`, but its DHCP helper inherits no standard descriptors: `POSIX_SPAWN_CLOEXEC_DEFAULT` closes stdout/stderr when no inherit actions are supplied. The parent logs `l3: en0 DHCP client started (pid 224)`, then no helper diagnostics or DHCP packets appear. Corrected artifact [46009265668](https://github.com/riniki5/ios-sweet/actions/runs/46009265668) (`0acef49`) explicitly inherits fds 0, 1 and 2, passes hash verification, and still needs exact phone installation plus validation of IPv4 leasing, routing, DNS, Settings and Safari HTTP/HTTPS. Bluetooth, cellular, camera, GPS and SEP / Face ID are unavailable on toco; do not carry over the `sweet` branch's audio, haptics, sensor or SIM claims.
+- **Wi-Fi associates but has no validated Layer 3 yet.** Installed `0008` artifact `46009265668` (`0acef49`) is readback-verified, and on 2026-11-28 its helper reached `en0`, opened the DHCP sockets and sent four DISCOVERs after WPA2 association. The old sender used a `169.254.x.x/16` source and subnet broadcast; no OFFER, REQUEST, ACK, lease, default route or resolver appeared. Patch `0008` now sends initial DHCP with raw IPv4 `0.0.0.0 -> 255.255.255.255`, UDP `68 -> 67`, while retaining UDP port 68 for replies and unicast renewal. The host harness verifies the exact packet, both checksums, renewal and rebinding; the new iOS artifact and on-device DHCP/IPv4/DNS/Settings/Safari validation remain pending. Bluetooth, cellular, camera, GPS and SEP / Face ID are unavailable on toco; do not carry over the `sweet` branch's audio, haptics, sensor or SIM claims.
 - **PosterBoard can crash during first-time extension setup.** Preserved boot logs show `-[PBFPosterExtensionDataStore _stateLock_setupSwitcherConfigurationForFirstTime]` asserting `!_stateLock_switcherConfiguration`. Static tracing shows SpringBoard can request active-poster data from wallpaper callbacks while its asynchronous PosterBoard prewarm is still pending; the lazy getter then fills ivar `0x98` before the extension update calls first-time setup. A same-length shared-cache compatibility patch is prepared but not yet installed or boot-tested.
 - **GPU UI rendering is not yet qualified.** The strict CI kernel and matching native Metal bundle are built and verified, but the first temporary boot produced no USB telemetry and the phone is no longer in fastboot. A newer stage-0 diagnostic adds `GETLOG` and disables the GPU audit for the safest log-recovery boot; boot it with `SWEET_LOG_PERSIST=0` to retrieve the preceding boot's log. Stage 1 can also disable the unconditional DDR vote and BO-pool reservation. NativeAdreno is published only after strict clock and render-profile checks; a successful on-screen Metal draw and responsive UI have not yet been confirmed. Raw MMIO and secure-monitor transactions remain outside same-CPU timeout protection, so keep the GPU opt-in and preserve the working touch path while validating the userspace bundle.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty. Several apps show a black window (Phone, Photos, Messages) because they need hardware we do not have.
@@ -180,19 +180,23 @@ root-relative remote paths; absolute paths return `ENOENT`.
 With patch `0008`, `wland` supervises the `l3dhcp` helper after opening `/dev/wlan`.
 The helper waits for asynchronous `en0` creation, explicitly raises the
 interface, then waits for `SIOCGIFMEDIA` to report both `IFM_AVALID` and
-`IFM_ACTIVE`. It uses a temporary IPv4 link-local source for the first DHCP
-broadcast and targets that source's `/16` subnet broadcast, because XNU can
-rewrite `255.255.255.255` to another primary interface before applying
-`IP_BOUND_IF`. Renewal targets the server and rebinding targets the leased subnet
-broadcast. The helper replaces the temporary address with the leased address,
-handles renewal/rebinding/expiry, rolls back failed address/route changes, and
-cleans up on link loss or shutdown. DHCP DNS is written atomically to
-`/etc/resolv.conf` only when no resolver file already exists, and the lease is
-also published through `netsvc` for SystemConfiguration. The installer sets
-`WLAND_EN0_DHCP=1`; set it to `0` to disable this helper. Set
-`WLAND_FORCE_UTUN=1` to bypass the kernel bridge and use the existing userland
-`ipnet`/utun DHCP path instead. These are `wland` environment variables, not
-kernel boot arguments.
+`IFM_ACTIVE`. It keeps a temporary randomized IPv4 link-local address as a
+scoped route, but initial SELECTING and REQUESTING packets use a raw IPv4
+socket bound with `IP_BOUND_IF`: source `0.0.0.0`, destination
+`255.255.255.255`, UDP ports 68 and 67. The raw frame has valid IPv4 and UDP
+checksums and a nonzero IPv4 ID. The ordinary UDP socket remains bound to port
+68 for OFFER/ACK reception; renewal is UDP unicast to the server, and rebinding
+uses raw IPv4 with the leased source and subnet broadcast. This replaces the
+old `169.254.x.x/16` source/subnet-broadcast approach, which produced four
+DISCOVERs but no OFFER on hardware. The helper replaces the temporary address
+with the leased address, handles renewal/rebinding/expiry, rolls back failed
+address/route changes, and cleans up on link loss or shutdown. DHCP DNS is
+written atomically to `/etc/resolv.conf` only when no resolver file already
+exists, and the lease is also published through `netsvc` for
+SystemConfiguration. The installer sets `WLAND_EN0_DHCP=1`; set it to `0` to
+disable this helper. Set `WLAND_FORCE_UTUN=1` to bypass the kernel bridge and
+use the existing userland `ipnet`/utun DHCP path instead. These are `wland`
+environment variables, not kernel boot arguments.
 
 CI run `46009265668` (`0acef49`) fixes helper standard-stream inheritance:
 `POSIX_SPAWN_CLOEXEC_DEFAULT` closes stdout/stderr when the spawn actions do not
@@ -201,14 +205,15 @@ for fds 0, 1 and 2 before spawning `/var/local/bin/wland l3dhcp`. This corrected
 binary is installed and readback-verified on the phone; the previous
 `45987546268` binary lacked the fix.
 
-Validation must show `helper entered`, the `en0` interface index and DHCP
-sockets, a temporary link-local DHCP source, DHCP DISCOVER/OFFER/REQUEST/ACK, an
-`en0` IPv4 address and netmask, a default route through the offered router, and
-successful `netsvc up` publication. Then compare
-ICMP to a public IP with name resolution and test both HTTP and HTTPS in Safari;
-TLS clock and certificate trust remain separate checks. The USB file service has
-no command-execution primitive, so use the persisted `wland` log and Safari until
-a diagnostic shell is available.
+Validation must show `helper entered`, the `en0` interface index and raw/UDP
+DHCP sockets, DHCP DISCOVER/OFFER/REQUEST/ACK, an `en0` IPv4 address and
+netmask, a default route through the offered router, and successful `netsvc up`
+publication. The new raw sender has passed host protocol, checksum, sanitizer
+and static-analysis checks, but no iOS CI artifact or on-device OFFER exists
+yet. Then compare ICMP to a public IP with name resolution and test both HTTP
+and HTTPS in Safari; TLS clock and certificate trust remain separate checks.
+The USB file service has no command-execution primitive, so use the persisted
+`wland` log and Safari until a diagnostic shell is available.
 
 The CPU renderer is the frame-time limit on this panel, so `tools/toco-shim.sh` reports a smaller logical display by default: 828×1792 (iPhone XR class, 414×896 points at 2×). It passes the same dimensions to the ADT and the `sweetfb_w`/`sweetfb_h` boot args, and AppleCLCD stretches the frames to 1080×2340. Override both dimensions together with `SWEET_FB_W`/`SWEET_FB_H`; `SWEET_FB_SCALE` controls the ADT scale. The ADT and the boot args must agree.
 

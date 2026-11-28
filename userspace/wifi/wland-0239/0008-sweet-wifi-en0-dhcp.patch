@@ -1,5 +1,5 @@
 diff --git a/phone/tools/netsvc.m b/phone/tools/netsvc.m
-index d82a382..02b9579 100755
+index d82a382..02b9579 100644
 --- a/phone/tools/netsvc.m
 +++ b/phone/tools/netsvc.m
 @@ -4,7 +4,7 @@
@@ -31,7 +31,7 @@ index d82a382..02b9579 100755
  		SCDynamicStoreRef st = SCDynamicStoreCreate(NULL, CFSTR("netsvc"), NULL, NULL);
  		if (!st) {
 diff --git a/phone/wifi/bridge.c b/phone/wifi/bridge.c
-index 8f22298..27e17d2 100755
+index 8f22298..27e17d2 100644
 --- a/phone/wifi/bridge.c
 +++ b/phone/wifi/bridge.c
 @@ -1,8 +1,8 @@
@@ -56,10 +56,10 @@ index 8f22298..27e17d2 100755
  		return -1;
 diff --git a/phone/wifi/l3dhcp.c b/phone/wifi/l3dhcp.c
 new file mode 100755
-index 0000000..273b17e
+index 0000000..b66a256
 --- /dev/null
 +++ b/phone/wifi/l3dhcp.c
-@@ -0,0 +1,904 @@
+@@ -0,0 +1,978 @@
 +#include <arpa/inet.h>
 +#include <errno.h>
 +#include <fcntl.h>
@@ -81,6 +81,12 @@ index 0000000..273b17e
 +
 +#ifndef IP_BOUND_IF
 +#define IP_BOUND_IF 25
++#endif
++#ifndef IP_HDRINCL
++#define IP_HDRINCL 10
++#endif
++#ifndef IPPROTO_RAW
++#define IPPROTO_RAW 255
 +#endif
 +
 +#define L3_IFM_AVALID 0x00000001
@@ -113,12 +119,12 @@ index 0000000..273b17e
 +static pid_t parent_pid;
 +static int dstate;
 +static uint32_t xid, offered, server_id, my_ip, my_mask, my_broadcast, my_router;
-+static uint32_t my_dns[2], lease_seconds, bootstrap_ip, source_broadcast;
++static uint32_t my_dns[2], lease_seconds, bootstrap_ip;
 +static uint64_t sent_ms, started_ms, bound_ms, next_start_ms, renew_ms, rebind_ms, expires_ms;
 +static unsigned tries;
 +static char domain[256], my_domain[256];
 +static int resolv_owned;
-+static int control_fd = -1, udp_fd = -1;
++static int control_fd = -1, udp_fd = -1, raw_fd = -1;
 +
 +static uint64_t now_ms(void)
 +{
@@ -165,6 +171,10 @@ index 0000000..273b17e
 +        return error;
 +    }
 +    if (udp_fd >= 0 && (error = posix_spawn_file_actions_addclose(actions, udp_fd)) != 0) {
++        posix_spawn_file_actions_destroy(actions);
++        return error;
++    }
++    if (raw_fd >= 0 && (error = posix_spawn_file_actions_addclose(actions, raw_fd)) != 0) {
 +        posix_spawn_file_actions_destroy(actions);
 +        return error;
 +    }
@@ -221,21 +231,6 @@ index 0000000..273b17e
 +        return 0;
 +    address = (struct sockaddr_in *)&request.ifr_addr;
 +    return address->sin_family == AF_INET ? address->sin_addr.s_addr : 0;
-+}
-+
-+static int interface_broadcast(int control, const char *ifname, uint32_t *broadcast)
-+{
-+    struct ifreq request;
-+    struct sockaddr_in *address;
-+    memset(&request, 0, sizeof(request));
-+    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
-+    if (ioctl(control, SIOCGIFBRDADDR, &request) < 0)
-+        return -1;
-+    address = (struct sockaddr_in *)&request.ifr_broadaddr;
-+    if (address->sin_family != AF_INET || !address->sin_addr.s_addr)
-+        return -1;
-+    *broadcast = address->sin_addr.s_addr;
-+    return 0;
 +}
 +
 +static int interface_up(int control, const char *ifname)
@@ -398,24 +393,18 @@ index 0000000..273b17e
 +    return 0;
 +}
 +
-+/* XNU needs an interface IPv4 address before it can source the first DHCP broadcast. */
++/* Keep a scoped IPv4 route while raw DHCP supplies the standard zero source. */
 +static int bootstrap_prepare(int control, const char *ifname)
 +{
-+    source_broadcast = 0;
-+    if (primary_address(control, ifname)) {
-+        if (interface_up(control, ifname) < 0 ||
-+            interface_broadcast(control, ifname, &source_broadcast) < 0)
-+            return -1;
-+        return 0;
-+    }
++    if (primary_address(control, ifname))
++        return interface_up(control, ifname);
 +    for (unsigned attempt = 0; attempt < 8; attempt++) {
 +        uint32_t host = 1 + arc4random_uniform(0xfdff);
 +        if ((host & 0xff) == 0 || (host & 0xff) == 0xff)
 +            continue;
 +        uint32_t address = htonl(0xa9fe0000u | host);
-+        source_broadcast = address | htonl(0x0000ffff);
 +        if (address_change(control, ifname, address, htonl(0xffff0000),
-+                           source_broadcast, 1) < 0)
++                           address | htonl(0x0000ffff), 1) < 0)
 +            return -1;
 +        bootstrap_ip = address;
 +        char text[INET_ADDRSTRLEN];
@@ -432,7 +421,6 @@ index 0000000..273b17e
 +    if (bootstrap_ip && bootstrap_ip != my_ip)
 +        address_change(control, ifname, bootstrap_ip, 0, 0, 0);
 +    bootstrap_ip = 0;
-+    source_broadcast = 0;
 +}
 +
 +static void restore_lease(int control, const char *ifname, uint32_t address, uint32_t mask,
@@ -706,7 +694,74 @@ index 0000000..273b17e
 +    }
 +}
 +
-+static int dhcp_send(int udp, const char *ifname, const uint8_t mac[6], int type)
++static void checksum_add(uint32_t *sum, const uint8_t *data, size_t length)
++{
++    while (length >= 2) {
++        *sum += ((uint32_t)data[0] << 8) | data[1];
++        data += 2;
++        length -= 2;
++    }
++    if (length)
++        *sum += (uint32_t)data[0] << 8;
++}
++
++static uint16_t checksum_finish(uint32_t sum)
++{
++    while (sum >> 16)
++        sum = (sum & 0xffff) + (sum >> 16);
++    return (uint16_t)~sum;
++}
++
++static void checksum_store(uint8_t *output, uint16_t value)
++{
++    output[0] = (uint8_t)(value >> 8);
++    output[1] = (uint8_t)value;
++}
++
++static int dhcp_send_raw(int raw, uint32_t source, const uint8_t packet[300],
++                         const struct sockaddr_in *destination)
++{
++    uint8_t frame[328];
++    memset(frame, 0, sizeof(frame));
++    frame[0] = 0x45;
++    uint16_t total = htons(sizeof(frame));
++    memcpy(frame + 2, &total, 2);
++    uint16_t identifier;
++    memcpy(&identifier, &xid, 2);
++    if (!identifier)
++        identifier = htons(1);
++    memcpy(frame + 4, &identifier, 2);
++    frame[8] = 64;
++    frame[9] = IPPROTO_UDP;
++    memcpy(frame + 12, &source, 4);
++    memcpy(frame + 16, &destination->sin_addr, 4);
++    uint16_t source_port = htons(68), destination_port = htons(67), udp_length = htons(308);
++    memcpy(frame + 20, &source_port, 2);
++    memcpy(frame + 22, &destination_port, 2);
++    memcpy(frame + 24, &udp_length, 2);
++    memcpy(frame + 28, packet, 300);
++
++    uint32_t ip_sum = 0;
++    checksum_add(&ip_sum, frame, 20);
++    checksum_store(frame + 10, checksum_finish(ip_sum));
++    uint32_t udp_sum = 0;
++    checksum_add(&udp_sum, frame + 12, 8);
++    const uint8_t pseudo_protocol[4] = { 0, 0, 0, IPPROTO_UDP };
++    checksum_add(&udp_sum, pseudo_protocol, sizeof(pseudo_protocol));
++    checksum_add(&udp_sum, frame + 20, 8);
++    checksum_add(&udp_sum, frame + 28, 300);
++    uint16_t udp_checksum = checksum_finish(udp_sum);
++    checksum_store(frame + 26, udp_checksum ? udp_checksum : 0xffff);
++
++    if (sendto(raw, frame, sizeof(frame), 0, (const struct sockaddr *)destination,
++               sizeof(*destination)) < 0) {
++        log_msg("DHCP raw send: %s", strerror(errno));
++        return -1;
++    }
++    return 0;
++}
++
++static int dhcp_send(int raw, int udp, const char *ifname, const uint8_t mac[6], int type)
 +{
 +    uint8_t packet[576] = { 0 }, *options;
 +    packet[0] = 1;
@@ -746,25 +801,33 @@ index 0000000..273b17e
 +    destination.sin_len = sizeof(destination);
 +    destination.sin_family = AF_INET;
 +    destination.sin_port = htons(67);
-+    uint32_t broadcast = dstate == D_REBINDING && my_broadcast ? my_broadcast : source_broadcast;
-+    destination.sin_addr.s_addr = dstate == D_RENEWING && server_id ? server_id :
-+        (broadcast ? broadcast : htonl(INADDR_BROADCAST));
++    int unicast = dstate == D_RENEWING && server_id;
++    destination.sin_addr.s_addr = unicast ? server_id :
++        ((dstate == D_REBINDING || dstate == D_RENEWING) && my_broadcast ? my_broadcast :
++         htonl(INADDR_BROADCAST));
 +    sent_ms = now_ms();
-+    if (sendto(udp, packet, 300, 0, (struct sockaddr *)&destination, sizeof(destination)) < 0) {
-+        log_msg("DHCP send: %s", strerror(errno));
-+        return -1;
++    int result;
++    if (unicast) {
++        result = sendto(udp, packet, 300, 0, (struct sockaddr *)&destination, sizeof(destination));
++        if (result < 0)
++            log_msg("DHCP send: %s", strerror(errno));
++    } else {
++        uint32_t source = dstate == D_RENEWING || dstate == D_REBINDING ? my_ip : 0;
++        result = dhcp_send_raw(raw, source, packet, &destination);
 +    }
++    if (result < 0)
++        return -1;
 +    log_msg("DHCP %s sent on %s", type == 1 ? "DISCOVER" : "REQUEST", ifname);
 +    return 0;
 +}
 +
-+static void dhcp_start(int udp, const char *ifname, const uint8_t mac[6])
++static void dhcp_start(int raw, int udp, const char *ifname, const uint8_t mac[6])
 +{
 +    arc4random_buf(&xid, sizeof(xid));
 +    dstate = D_SELECTING;
 +    tries = 0;
 +    started_ms = now_ms();
-+    dhcp_send(udp, ifname, mac, 1);
++    dhcp_send(raw, udp, ifname, mac, 1);
 +}
 +
 +static unsigned retry_ms(unsigned attempt)
@@ -772,14 +835,14 @@ index 0000000..273b17e
 +    return 2000u << (attempt < 4 ? attempt : 4);
 +}
 +
-+static void dhcp_timer(int udp, const char *ifname, const uint8_t mac[6], uint64_t now)
++static void dhcp_timer(int raw, int udp, const char *ifname, const uint8_t mac[6], uint64_t now)
 +{
 +    if ((dstate == D_SELECTING || dstate == D_REQUESTING) && now - sent_ms >= retry_ms(tries)) {
 +        if (++tries > 6) {
 +            dhcp_abort(control_fd, ifname, "timed out");
 +            return;
 +        }
-+        dhcp_send(udp, ifname, mac, dstate == D_SELECTING ? 1 : 3);
++        dhcp_send(raw, udp, ifname, mac, dstate == D_SELECTING ? 1 : 3);
 +        return;
 +    }
 +    if ((dstate == D_BOUND || dstate == D_RENEWING || dstate == D_REBINDING) &&
@@ -790,13 +853,13 @@ index 0000000..273b17e
 +    if (dstate == D_BOUND && now >= rebind_ms) {
 +        dstate = D_REBINDING;
 +        tries = 0;
-+        dhcp_send(udp, ifname, mac, 3);
++        dhcp_send(raw, udp, ifname, mac, 3);
 +        return;
 +    }
 +    if (dstate == D_BOUND && now >= renew_ms) {
 +        dstate = D_RENEWING;
 +        tries = 0;
-+        dhcp_send(udp, ifname, mac, 3);
++        dhcp_send(raw, udp, ifname, mac, 3);
 +        return;
 +    }
 +    if ((dstate == D_RENEWING || dstate == D_REBINDING) && now - sent_ms >= retry_ms(tries)) {
@@ -806,7 +869,7 @@ index 0000000..273b17e
 +        }
 +        if (tries < 5)
 +            tries++;
-+        dhcp_send(udp, ifname, mac, 3);
++        dhcp_send(raw, udp, ifname, mac, 3);
 +    }
 +}
 +
@@ -827,28 +890,33 @@ index 0000000..273b17e
 +        log_msg("%s interface index %u", ifname, interface_index);
 +        control_fd = socket(AF_INET, SOCK_DGRAM, 0);
 +        udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-+        if (control_fd < 0 || udp_fd < 0) {
++        raw_fd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
++        if (control_fd < 0 || udp_fd < 0 || raw_fd < 0) {
 +            log_msg("socket: %s", strerror(errno));
 +            if (control_fd >= 0)
 +                close(control_fd);
 +            if (udp_fd >= 0)
 +                close(udp_fd);
-+            control_fd = udp_fd = -1;
++            if (raw_fd >= 0)
++                close(raw_fd);
++            control_fd = udp_fd = raw_fd = -1;
 +            usleep(1000000);
 +            continue;
 +        }
-+        log_msg("DHCP sockets opened (control %d, UDP %d)", control_fd, udp_fd);
-+        if (close_on_exec(control_fd) < 0 || close_on_exec(udp_fd) < 0) {
++        log_msg("DHCP sockets opened (control %d, UDP %d, raw %d)", control_fd, udp_fd, raw_fd);
++        if (close_on_exec(control_fd) < 0 || close_on_exec(udp_fd) < 0 || close_on_exec(raw_fd) < 0) {
 +            log_msg("FD_CLOEXEC: %s", strerror(errno));
 +            close(control_fd);
 +            close(udp_fd);
-+            control_fd = udp_fd = -1;
++            close(raw_fd);
++            control_fd = udp_fd = raw_fd = -1;
 +            continue;
 +        }
 +        if (interface_up(control_fd, ifname) < 0) {
 +            close(control_fd);
 +            close(udp_fd);
-+            control_fd = udp_fd = -1;
++            close(raw_fd);
++            control_fd = udp_fd = raw_fd = -1;
 +            usleep(1000000);
 +            continue;
 +        }
@@ -862,11 +930,15 @@ index 0000000..273b17e
 +        if (setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0 ||
 +            setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one)) < 0 ||
 +            setsockopt(udp_fd, IPPROTO_IP, IP_BOUND_IF, &interface_index, sizeof(interface_index)) < 0 ||
++            setsockopt(raw_fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one)) < 0 ||
++            setsockopt(raw_fd, IPPROTO_IP, IP_BOUND_IF, &interface_index, sizeof(interface_index)) < 0 ||
++            setsockopt(raw_fd, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0 ||
 +            bind(udp_fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
 +            log_msg("bind DHCP to %s: %s", ifname, strerror(errno));
 +            close(control_fd);
 +            close(udp_fd);
-+            control_fd = udp_fd = -1;
++            close(raw_fd);
++            control_fd = udp_fd = raw_fd = -1;
 +            usleep(1000000);
 +            continue;
 +        }
@@ -898,14 +970,15 @@ index 0000000..273b17e
 +                        next_start_ms = now + 2000;
 +                        continue;
 +                    }
-+                    dhcp_start(udp_fd, ifname, mac);
++                    dhcp_start(raw_fd, udp_fd, ifname, mac);
 +                }
 +                continue;
 +            }
-+            dhcp_timer(udp_fd, ifname, mac, now);
++            dhcp_timer(raw_fd, udp_fd, ifname, mac, now);
 +            for (int count = 0; count < 8; count++) {
 +                uint8_t packet[576];
 +                struct sockaddr_in peer;
++                memset(&peer, 0, sizeof(peer));
 +                socklen_t peer_length = sizeof(peer);
 +                ssize_t length = recvfrom(udp_fd, packet, sizeof(packet), 0,
 +                                          (struct sockaddr *)&peer, &peer_length);
@@ -918,7 +991,8 @@ index 0000000..273b17e
 +        lease_release(control_fd, ifname);
 +        close(control_fd);
 +        close(udp_fd);
-+        control_fd = udp_fd = -1;
++        close(raw_fd);
++        control_fd = udp_fd = raw_fd = -1;
 +        if (!stopping && getppid() == parent_pid)
 +            log_msg("%s changed; reopening DHCP session", ifname);
 +    }
@@ -975,7 +1049,7 @@ index 0000000..da98b77
 +int l3dhcp_main(int argc, char **argv);
 +#endif
 diff --git a/phone/wifi/wland.c b/phone/wifi/wland.c
-index 8ea8d4b..b4df821 100755
+index 8ea8d4b..13296f8 100644
 --- a/phone/wifi/wland.c
 +++ b/phone/wifi/wland.c
 @@ -25,8 +25,10 @@
@@ -1114,7 +1188,7 @@ index 8ea8d4b..b4df821 100755
  static void net_idle(void)
  {
  	if (drop_asked) {
-@@ -674,6 +761,7 @@ static void net_idle(void)
+@@ -674,6 +779,7 @@ static void net_idle(void)
  	radio_poll();
  	ipnet_poll();
  	bridge_poll();
@@ -1122,7 +1196,7 @@ index 8ea8d4b..b4df821 100755
  	join_poll();
  	cell_poll();
  }
-@@ -684,7 +772,9 @@ static int net(unsigned secs)
+@@ -684,7 +790,9 @@ static int net(unsigned secs)
  		verbose_link = atoi(getenv("WLAND_VERBOSE"));
  	link_idle = net_idle;
  	signal(SIGUSR1, on_usr1);
@@ -1133,7 +1207,7 @@ index 8ea8d4b..b4df821 100755
  	if (link_up(net_cb, 5000))
  		return -1;
  	if (rmtfs_init())
-@@ -694,7 +784,7 @@ static int net(unsigned secs)
+@@ -694,7 +802,7 @@ static int net(unsigned secs)
  	read_conf();
  	cell_init();
  	uint64_t end = link_ms() + (uint64_t)secs * 1000, stats = link_ms() + 30000;
@@ -1142,7 +1216,7 @@ index 8ea8d4b..b4df821 100755
  		link_poll(100);
  		if (link_ms() > stats) {
  			radio_stats();
-@@ -706,12 +796,20 @@ static int net(unsigned secs)
+@@ -706,12 +814,20 @@ static int net(unsigned secs)
  			printf("net: WLFW bring-up failed\n");
  		} else if (!getenv("WLAND_NO_RADIO")) {
  			delay_ms(100);	/* topaz: only after mission mode; before it a CE access hangs the bus */
@@ -1165,7 +1239,7 @@ index 8ea8d4b..b4df821 100755
  	radio_summary();
  	radio_stats();
  	return 0;
-@@ -808,6 +906,8 @@ int main(int argc, char **argv)
+@@ -808,6 +924,8 @@ int main(int argc, char **argv)
  		return 2;
  	}
  	setvbuf(stdout, NULL, _IONBF, 0);	/* a stalled bus access must not swallow the output */
