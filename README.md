@@ -227,12 +227,16 @@ bytes with SHA-256
 `97c5aa8369b7748fb610b232dc63bfe50ceacf7238ef04299bc2dc16a0fc02d0`.
 It retains the bounded diagnostics, tolerates malformed optional domain names,
 decodes RFC 3397 domain-search options, and leaves the IPv4 UDP checksum zero,
-which is valid and explicitly accepted by XNU. Reboot to fastboot and
-temporary-boot the network-trace image with this final binary installed, then
-compare ICMP to a public IP with name resolution and test both HTTP and HTTPS
-in Safari; TLS clock and certificate trust remain separate checks. The USB
-file service has no command-execution primitive, so use the persisted `wland`
-log and Safari until a diagnostic shell is available.
+which is valid and explicitly accepted by XNU. On 2026-11-28 the previous
+`193bdc7363fc3d24a9d6c496f89b466cdf65497fbe4bbd39a8d6f4624948f4aa` binary
+was backed up, this final binary was exact-replaced, phone readback matched
+`97c5aa8369b7748fb610b232dc63bfe50ceacf7238ef04299bc2dc16a0fc02d0`, and
+`SYNC` succeeded. Hardware validation remains pending: reboot to fastboot and
+temporary-boot the network-trace image, then compare ICMP to a public IP with
+name resolution and test both HTTP and HTTPS in Safari; TLS clock and
+certificate trust remain separate checks. The USB file service has no
+command-execution primitive, so use the persisted `wland` log and Safari until
+a diagnostic shell is available.
 
 The CPU renderer is the frame-time limit on this panel, so `tools/toco-shim.sh` reports a smaller logical display by default: 828×1792 (iPhone XR class, 414×896 points at 2×). It passes the same dimensions to the ADT and the `sweetfb_w`/`sweetfb_h` boot args, and AppleCLCD stretches the frames to 1080×2340. Override both dimensions together with `SWEET_FB_W`/`SWEET_FB_H`; `SWEET_FB_SCALE` controls the ADT scale. The ADT and the boot args must agree.
 
