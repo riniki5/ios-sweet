@@ -26,7 +26,7 @@ As of **2026-11-28**, known-good CPU-rendered configurations have reached the iO
 | GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; native-Metal UI rendering still needs qualification |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power and volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
-| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. The raw-DHCP binary from run `46127351040` ran and reached its raw socket, but XNU rejected every send with `EINVAL`; the host-order IPv4-length fix passed CI run `46130693764`, and its verified artifact is installed and awaiting a reboot test |
+| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. The host-order IPv4-length fix passed CI run `46130693764` and booted on hardware; the `en0` trace then captured repeated DHCP OFFER arrivals, but no lease, route or resolver followed. Bounded receive/reject diagnostics are being added to locate the remaining userspace/kernel delivery blocker |
 | Battery | Bring-up IOPMPowerSource service with a static 100% reading and charging icon; not real fuel-gauge telemetry |
 | Device identity | Emulated iPhone X identity (`iPhone10,3` / `D22AP`) for userland compatibility and gesture UI; the physical device remains a Mi Note 10 Lite |
 | Activation | Bring-up activation path in mobileactivationd, selected through device-tree security status; not a genuine Apple activation |
@@ -208,17 +208,25 @@ binary is installed and readback-verified on the phone; the previous
 Validation must show `helper entered`, the `en0` interface index and raw/UDP
 DHCP sockets, DHCP DISCOVER/OFFER/REQUEST/ACK, an `en0` IPv4 address and
 netmask, a default route through the offered router, and successful `netsvc up`
-publication. The new raw sender passed host protocol, checksum, sanitizer and
-static-analysis checks, and CI run `46127351040` produced a strict-codesign-verified
-arm64 `wland` with SHA-256
-`adb049bd068b510c5a7aad1a1c54eaa842d8344e3866c865745583a4b65720c3`.
-`netsvc` is byte-identical to the installed binary. The verified `wland` is
-now exact-replaced and readback-verified after `SYNC`, with the prior binary
-backed up; the new process has not run yet, so no on-device OFFER exists.
-Reboot to fastboot and temporary-boot the network-trace image, then compare
-ICMP to a public IP with name resolution and test both HTTP and HTTPS in
-Safari; TLS clock and certificate trust remain separate checks. The USB file
-service has no command-execution primitive, so use the persisted `wland` log
+publication. The host-order-length correction passed host protocol, checksum,
+sanitizer and static-analysis checks, and CI run `46130693764` produced a
+strict-codesign-verified arm64 `wland` with SHA-256
+`193bdc7363fc3d24a9d6c496f89b466cdf65497fbe4bbd39a8d6f4624948f4aa`.
+`netsvc` remains byte-identical. That corrected binary is installed,
+readback-verified and has now temporary-booted. WCN3990 association and the
+`en0` bridge came up, and the kernel trace captured repeated IPv4 UDP packets
+from the router's DHCP server to `255.255.255.255:68`; no OFFER acceptance,
+REQUEST, ACK, lease, route or resolver publication followed. The fetched
+userspace log was an early partial snapshot, and the USB CDC endpoint then
+stalled, so the exact receive/parser failure is not yet known. A diagnostic
+build will log the first socket replies and bounded rejection reasons; it also
+accepts malformed optional domain names without discarding an otherwise valid
+lease and decodes RFC 3397 domain-search options. Reboot to fastboot and
+temporary-boot the network-trace image with the diagnostic binary installed,
+then compare ICMP to a public IP with name resolution and test both HTTP and
+HTTPS in Safari; TLS clock and certificate trust remain separate checks. The
+USB file service has no command-execution primitive, so use the persisted
+`wland` log
 and Safari until a diagnostic shell is available.
 
 The CPU renderer is the frame-time limit on this panel, so `tools/toco-shim.sh` reports a smaller logical display by default: 828×1792 (iPhone XR class, 414×896 points at 2×). It passes the same dimensions to the ADT and the `sweetfb_w`/`sweetfb_h` boot args, and AppleCLCD stretches the frames to 1080×2340. Override both dimensions together with `SWEET_FB_W`/`SWEET_FB_H`; `SWEET_FB_SCALE` controls the ADT scale. The ADT and the boot args must agree.
