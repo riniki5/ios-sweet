@@ -8,7 +8,7 @@ The project descends from [dipa-studio/ios-sweet](https://github.com/dipa-studio
 
 Active development is on [`codex/springboard-gpu-access`](https://github.com/riniki5/ios-sweet/tree/codex/springboard-gpu-access). The fork's default `main` branch retains the upstream `sweet` port; its hardware and feature claims are not `toco` results.
 
-As of **2026-11-28**, known-good CPU-rendered configurations have reached the iOS lock/home screen with working touch and hardware buttons. WCN3990 scanning, WPA2 authentication and association work through the kernel `en0` bridge. The installed `0008` build (`45987546268`) reaches association, but its DHCP helper closes stdout/stderr during spawn; corrected arm64 CI artifact `46009265668` is verified and staged, while phone installation and on-device IPv4/DNS/Safari validation remain pending. The current Apple-logo spinner includes a PosterBoard first-time setup assertion; static tracing identifies a startup race that can populate its switcher configuration too early, and the compatibility patch is not yet installed. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup and a CP fence have completed on toco; a successful native-Metal UI draw and stable 60 FPS have not been confirmed, and GPU diagnostic boots may still stall at the Apple logo.
+As of **2026-11-28**, known-good CPU-rendered configurations have reached the iOS lock/home screen with working touch and hardware buttons. WCN3990 scanning, WPA2 authentication and association work through the kernel `en0` bridge. Corrected `0008` artifact `46009265668` is installed and readback-verified on the phone; one reboot is still required before validating its DHCP helper, IPv4/DNS and Safari. The current Apple-logo spinner includes a PosterBoard first-time setup assertion; static tracing identifies a startup race that can populate its switcher configuration too early, and the compatibility patch is prepared but not yet installed. GPU firmware staging, GMU/HFI startup, SMMU translation, ZAP authentication, SQE startup and a CP fence have completed on toco; a successful native-Metal UI draw and stable 60 FPS have not been confirmed, and GPU diagnostic boots may still stall at the Apple logo.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into `userdata` and **erases Android's user data**. Never flash `boot`, `dtbo` or `recovery`; test kernels only with `fastboot boot shim-boot.img`.
 
@@ -26,7 +26,7 @@ As of **2026-11-28**, known-good CPU-rendered configurations have reached the iO
 | GPU bring-up | Adreno 618 GMU firmware, HFI, SMMU, ZAP, SQE and CP fence verified on toco; native-Metal UI rendering still needs qualification |
 | Touch | Focaltech FTM5 (f521) over I²C, AVDD voted to 3.0 V through RPMh, delivered as HID digitizer events |
 | Buttons | Power and volume up/down (PMIC through SPMI) as HID consumer keys; lock/wake works |
-| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. Installed `0008` artifact `45987546268` starts the DHCP client but its helper loses stdout/stderr; corrected artifact `46009265668` is verified and awaits phone installation/device validation |
+| Wi-Fi link | WCN3990 firmware, scanning, WPA2 authentication, key installation and association work through the kernel `en0` bridge. Corrected `0008` artifact `46009265668` is installed and readback-verified; DHCP/IPv4/DNS/Safari validation awaits a reboot |
 | Battery | Bring-up IOPMPowerSource service with a static 100% reading and charging icon; not real fuel-gauge telemetry |
 | Device identity | Emulated iPhone X identity (`iPhone10,3` / `D22AP`) for userland compatibility and gesture UI; the physical device remains a Mi Note 10 Lite |
 | Activation | Bring-up activation path in mobileactivationd, selected through device-tree security status; not a genuine Apple activation |
@@ -197,8 +197,9 @@ kernel boot arguments.
 CI run `46009265668` (`0acef49`) fixes helper standard-stream inheritance:
 `POSIX_SPAWN_CLOEXEC_DEFAULT` closes stdout/stderr when the spawn actions do not
 explicitly inherit them, so `wland` now adds `posix_spawn_file_actions_addinherit_np`
-for fds 0, 1 and 2 before spawning `/var/local/bin/wland l3dhcp`. The installed
-`45987546268` binary lacks that fix.
+for fds 0, 1 and 2 before spawning `/var/local/bin/wland l3dhcp`. This corrected
+binary is installed and readback-verified on the phone; the previous
+`45987546268` binary lacked the fix.
 
 Validation must show `helper entered`, the `en0` interface index and DHCP
 sockets, a temporary link-local DHCP source, DHCP DISCOVER/OFFER/REQUEST/ACK, an
